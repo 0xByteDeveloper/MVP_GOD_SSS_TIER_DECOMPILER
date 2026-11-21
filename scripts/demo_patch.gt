@@ -1,0 +1,6 @@
+# Assembler + patch + undo senaryosu
+load fixture.exe
+asm 0x14000100e "xor eax, eax"
+patch 0x14000100e a:"xor eax, eax"
+undo
+save fixture.patched.exe

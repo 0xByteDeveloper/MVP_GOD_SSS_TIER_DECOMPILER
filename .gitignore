@@ -1,0 +1,9 @@
+build/
+third_party/lib/
+imgui.ini
+*.zip
+*.o
+*.obj
+__pycache__/
+*.pdb
+!tests/fixtures/fixture.pdb

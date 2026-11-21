@@ -1,0 +1,12 @@
+# i4M-GodTier v6 — ARM64/ARM32 çoklu mimari demosu
+# Fixture'lar cross-compiler GEREKMEZ elle kodlanmıştır:
+#   python3 tests/fixtures/make_fixture_arm.py
+load tests/fixtures/kurban_arm64.elf
+funcs
+dis 0x400100 24
+xref 0x400138
+decomp 0x400130
+strings ARM
+load tests/fixtures/kurban_arm32.elf
+funcs
+dis 0x400100 6

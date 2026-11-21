@@ -1,0 +1,6 @@
+# i4M GodTier demo oturumu — PE + API shim + emulasyon
+load fixture_api.exe
+info
+map
+emu setup
+apitrace

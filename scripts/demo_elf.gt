@@ -1,0 +1,6 @@
+# ELF senaryosu: semboller + disassembly + pseudocode
+load fixture.elf
+funcs
+strings GODTIER
+dis loop_sum 15
+decomp loop_sum

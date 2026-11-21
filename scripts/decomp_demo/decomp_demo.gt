@@ -1,0 +1,34 @@
+# kurban.cpp decompiler demo — DECOMPILER_GERCEK_ANALIZ.md dokümanındaki
+# tüm çıktıları üreten oturum (v2). Önce derleyin:
+#   g++ -O0 -g -o kurban_O0 kurban.cpp
+#   objcopy --strip-debug kurban_O0
+#   g++ -O2 -o kurban_O2 kurban.cpp && strip kurban_O2 -o kurban_O2s
+# Çalıştırın (bu dizinde):
+#   godtier -s scripts/decomp_demo/decomp_demo.gt
+load kurban_O0
+funcs
+types
+dis 0x1149 21
+decomp 0x1149
+decomp 0x118e
+decomp 0x11d5
+decomp 0x120b
+decomp 0x12af
+xref 0x1149
+xref 0x11d5
+
+# ---- v4: derin keşif + imza motoru + obfus + yapılaştırma (kurban3) ----
+# kurban3: g++ -no-pie -O0 -o kurban3.elf kurban3_src.cpp
+#          g++ -no-pie -O0 -s -o kurban3s.elf kurban3_src.cpp
+load kurban3.elf
+obfus
+decomp opak_toplam
+decomp kac_defa
+decomp karma_toplam
+find hex 55 48 89 e5
+find imm 0x5a
+deep
+load kurban3s.elf
+deep
+deep apply
+funcs
