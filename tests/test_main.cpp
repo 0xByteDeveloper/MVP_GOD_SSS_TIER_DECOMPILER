@@ -1360,6 +1360,246 @@ int main() {
               "dogru kosulda komut calisir");
     }
 
+    // ==================================================================
+    // [25] v7: MSVC RTTI atlası + DEVRİT-PRO + x86-32 decompiler
+    //      (fixture_devirt.exe — metin2client.exe playerGetStatus deseninin
+    //       elle inşa edilmiş minyatürü: sembolsüz, PDB'sız çözüm kanıtı)
+    // ==================================================================
+    {
+        std::printf("[25] v7: RTTI atlasi + devirt-pro + x86-32 (fixture_devirt.exe)\n");
+        if (FileHas("fixture_devirt.exe")) {
+            auto* pe = dynamic_cast<PE*>(Binary::Open(PathOf("fixture_devirt.exe")));
+            CHECK(pe != nullptr, "fixture_devirt.exe acildi (PE32)");
+            if (pe) {
+                MappedImage img;
+                img.LoadFromBinary(*pe);
+                DisasmEngine de;
+                de.Init(pe->GetArch());
+                de.SetMemoryReader([&](u64 va, u8* o, size_t n) { return img.ReadBytes(va, o, n); });
+                Analyzer az(de, *pe, img);
+                az.RunFull(false);
+                Pseudocoder pc(az);
+
+                // ---- RTTI atlası: sembolsüz sınıf evreni ----
+                MsvcRtti& rtti = pc.Rtti();
+                CHECK(rtti.Classes().size() == 6,
+                      "RTTI: 6 vftable (CPlayer x3 + CExtra + CExtra2 + CEmu) (got %zu)",
+                      rtti.Classes().size());
+                const RttiClass* cpMain = nullptr;
+                for (auto& c : rtti.Classes())
+                    if (c.name == "CPlayer" && c.slots.size() == 40) cpMain = &c;
+                CHECK(cpMain != nullptr, "CPlayer ana vftable (40 slot)");
+                if (cpMain) {
+                    std::string why;
+                    CHECK(rtti.ResolveSlot(cpMain->vftVa, 0x10, &why) == 0x401020,
+                          "slot 4 (+0x10) = GetStatus 0x401020 (%s)", why.c_str());
+                    CHECK(rtti.ResolveSlot(cpMain->vftVa, 0x88, &why) == 0x401030,
+                          "slot 34 (+0x88) = GetActorPtr 0x401030 (%s)", why.c_str());
+                    CHECK(cpMain->objectOffset == 4,
+                          "COL offset = +4 (nesne icindeki CPlayer alt-nesnesi)");
+                }
+
+                // ---- DEVRİT-PRO: statik nesne kanıtları + çözümler ----
+                DevirtPro& dp = pc.Devirt();
+                CHECK(dp.StaticCount() == 2, "2 statik nesne (ms_singleton + ms_extra)");
+                CHECK(dp.ResolvedCount() == 5,
+                      "5 dolayli cagri statik cozuldu (v8: +emu +inversiyon) (got %zu)",
+                      dp.ResolvedCount());
+                auto* ins = az.InstructionsOf(0x4010e0);
+                CHECK(ins != nullptr, "playerGetStatus bulundu (0x4010e0)");
+                if (ins) {
+                    std::vector<u64> calls;
+                    for (auto& x : *ins)
+                        if (x.isCall && x.isIndirect) calls.push_back(x.addr);
+                    CHECK(calls.size() == 3, "3 dolayli cagri (got %zu)", calls.size());
+                    if (calls.size() == 3) {
+                        DevirtPro::Result r1 = dp.Resolve(calls[0]);
+                        CHECK(r1.resolved && r1.target == 0x401020,
+                              "cagri 1 (call eax): CPlayer::GetStatus statik cozuldu");
+                        CHECK(r1.className == "CPlayer" && r1.slot == 4,
+                              "cagri 1: sinif=CPlayer slot=4");
+                        CHECK(!r1.trace.empty(), "cagri 1: kanit izi (trace) var");
+                        DevirtPro::Result r2 = dp.Resolve(calls[1]);
+                        CHECK(r2.resolved && r2.target == 0x401030,
+                              "cagri 2 (call [edx+0x88]): CPlayer::GetActorPtr");
+                        CHECK(r2.className == "CPlayer" && r2.slot == 34,
+                              "cagri 2: sinif=CPlayer slot=34");
+                        DevirtPro::Result r3 = dp.Resolve(calls[2]);
+                        CHECK(r3.resolved && r3.isImport && r3.name == "py.dll.Py_BuildValue",
+                              "cagri 3: IAT import py.dll.Py_BuildValue (got %s)",
+                              r3.name.c_str());
+                    }
+                }
+                // muğlak zincir: iki sınıf aynı statik nesneye yazıyor → dürüst aday
+                auto* insA = az.InstructionsOf(0x401160);
+                CHECK(insA != nullptr, "muğlak fonksiyon bulundu (0x401160)");
+                if (insA) {
+                    for (auto& x : *insA) {
+                        if (!(x.isCall && x.isIndirect)) continue;
+                        DevirtPro::Result r = dp.Resolve(x.addr);
+                        CHECK(!r.resolved, "muğlak cagri COZULMEDI (dürüstlük)");
+                        CHECK(r.candidates.size() == 2,
+                              "2 aday (got %zu)", r.candidates.size());
+                        bool hasExtra = false, hasExtra2 = false;
+                        for (auto& n : r.candidateNames) {
+                            if (n.find("CExtra::") != std::string::npos) hasExtra = true;
+                            if (n.find("CExtra2::") != std::string::npos) hasExtra2 = true;
+                        }
+                        CHECK(hasExtra && hasExtra2, "aday isimleri CExtra/CExtra2");
+                    }
+                }
+
+                // ---- x86-32 decompiler çıktı kalitesi ----
+                std::string code = pc.DecompileFunction(0x4010e0);
+                CHECK(code.find("CPlayer::Instance().vf4(") != std::string::npos,
+                      "decomp: CPlayer::Instance().vf4(iType) — kaynak stili (v8)");
+                CHECK(code.find("CPlayer::Instance().vf34()") != std::string::npos,
+                      "decomp: CPlayer::Instance().vf34() — kaynak stili (v8)");
+                CHECK(code.find("py.dll.Py_BuildValue") != std::string::npos,
+                      "decomp: import cagrisi isimli");
+                CHECK(code.find("\"i\"") != std::string::npos,
+                      "decomp: Py_BuildValue(\"i\", ...) kisa format stringi");
+                size_t n4 = 0, pos4 = 0;
+                while ((pos4 = code.find("CPlayer::Instance().vf4(", pos4)) != std::string::npos) {
+                    n4++; pos4 += 8;
+                }
+                CHECK(n4 == 1, "decomp: Instance().vf4 cagrisi TEK kez basildi (got %zu)", n4);
+                std::string codeA = pc.DecompileFunction(0x401160);
+                CHECK(codeA.find("adaylari") != std::string::npos,
+                      "decomp: muğlak cagri aday notu gorunur");
+                delete pe;
+            }
+        } else {
+            std::printf("     (fixture_devirt.exe yok — v7 devirt testleri atlandi)\n");
+        }
+    }
+
+    // ==================================================================
+    // [26] v8: TIER-3 (Unicorn tohumlu pencere emülasyonu) + atlas
+    //      inversiyonu + Instance() katlaması — üç yeni devirt silahı
+    // ==================================================================
+    {
+        std::printf("[26] v8: tier-3 unicorn + atlas inversiyonu + Instance() "
+                    "+ v8.1 vfN sozlugu + mekanizma kirilimi\n");
+        if (FileHas("fixture_devirt.exe")) {
+            auto* pe = dynamic_cast<PE*>(Binary::Open(PathOf("fixture_devirt.exe")));
+            CHECK(pe != nullptr, "fixture_devirt.exe acildi (v8)");
+            if (pe) {
+                MappedImage img;
+                img.LoadFromBinary(*pe);
+                DisasmEngine de;
+                de.Init(pe->GetArch());
+                de.SetMemoryReader([&](u64 va, u8* o, size_t n) { return img.ReadBytes(va, o, n); });
+                Analyzer az(de, *pe, img);
+                az.RunFull(false);
+                Pseudocoder pc(az);
+                DevirtPro& dp = pc.Devirt();
+
+                // ---- TIER-3: lineer değerlendiricinin ÇÖZEMEDİĞİ vaka ----
+                // (fonksiyon vtable'ı .data'ya kendisi yazıp geri okuyor;
+                //  imajda yuva 0'dır — yalnız GERÇEK x86 emülasyonu yakalar)
+                auto* insE = az.InstructionsOf(0x4011e0);
+                CHECK(insE != nullptr, "tier-3 vakasi fonksiyonu bulundu (0x4011e0)");
+                u64 emuCall = 0;
+                if (insE)
+                    for (auto& x : *insE)
+                        if (x.isCall && x.isIndirect) emuCall = x.addr;
+                CHECK(emuCall != 0, "tier-3 cagrisi bulundu");
+                if (emuCall) {
+                    DevirtPro::Result r = dp.Resolve(emuCall);
+                    CHECK(r.resolved, "tier-3: unicorn pencere emulasyonu cozdumu");
+                    if (r.resolved) {
+                        CHECK(r.target == 0x401070,
+                              "tier-3 hedefi CEmu::method2 0x401070 (got 0x%llx)",
+                              (unsigned long long)r.target);
+                        CHECK(r.className == "CEmu" && r.slot == 2,
+                              "tier-3: sinif=CEmu slot=2");
+                        CHECK(r.why.find("tier-3") != std::string::npos,
+                              "kanit tier-3 etiketli");
+                    }
+                }
+
+                // ---- ATLAS İNVERSİYONU: sanal metod gövdesinde this-çağrı ----
+                // (GetStatus bir sanal metottur; sahibi tek vftable = CPlayer
+                //  → this'in vptr'si kanıtlanır → slot 34 statik çözülür)
+                auto* insG = az.InstructionsOf(0x401020);
+                CHECK(insG != nullptr, "GetStatus (sanal metod) bulundu");
+                u64 innerCall = 0;
+                if (insG)
+                    for (auto& x : *insG)
+                        if (x.isCall && x.isIndirect) innerCall = x.addr;
+                CHECK(innerCall != 0, "GetStatus ic sanal cagri bulundu");
+                if (innerCall) {
+                    DevirtPro::Result r = dp.Resolve(innerCall);
+                    CHECK(r.resolved && r.target == 0x401030,
+                          "inversiyon: this->GetActorPtr cozuldu (0x401030)");
+                    CHECK(r.className == "CPlayer" && r.slot == 34,
+                          "inversiyon: sinif=CPlayer slot=34");
+                }
+
+                // ---- Instance() katlaması (PDB'siz — RTTI kanıtıyla!) ----
+                std::string code = pc.DecompileFunction(0x4010e0);
+                CHECK(code.find("CPlayer::Instance().vf4(") != std::string::npos,
+                      "decomp: CPlayer::Instance().vf4(iType) — kaynak stili");
+                CHECK(code.find("CPlayer::Instance().vf34()") != std::string::npos,
+                      "decomp: CPlayer::Instance().vf34() — kaynak stili");
+                size_t nI = 0, pI = 0;
+                while ((pI = code.find("CPlayer::Instance()", pI)) != std::string::npos) {
+                    nI++; pI += 8;
+                }
+                CHECK(nI == 2, "Instance() tam 2 kez (tek-sefer basim korunuyor) (got %zu)", nI);
+                std::string codeE = pc.DecompileFunction(0x4011e0);
+                CHECK(codeE.find("CEmu::vf2(") != std::string::npos,
+                      "decomp: tier-3 cozumu CEmu::vf2 olarak render edildi");
+
+                // ---- v8.1: vfN SÖZLÜĞÜ — "vf4 NE?" çıktıda cevaplanıyor ----
+                // PDB'siz adlandırma vfN = vtable slot N (x86-32 ofset 4*N);
+                // kanıt koordinatları çağrının yanında VE fonksiyon-sonu
+                // sözlüğünde: vf4 = CPlayer vftable[0x402204] + 0x10 -> 0x401020
+                CHECK(code.find("vf4 = CPlayer vftable[0x402204] + 0x10 -> 0x401020")
+                          != std::string::npos,
+                      "v8.1: vf4 sozluk notu (vtable+ofset+hedef kanit koordinatlari)");
+                CHECK(code.find("vf34 = CPlayer vftable[0x402204] + 0x88 -> 0x401030")
+                          != std::string::npos,
+                      "v8.1: vf34 sozluk notu (+0x88 slot ofseti)");
+                CHECK(code.find("vfN sozlugu") != std::string::npos,
+                      "v8.1: fonksiyon-sonu vfN sozlugu footer'i");
+                CHECK(codeE.find("vf2 = CEmu vftable[") != std::string::npos,
+                      "v8.1: tier-3 cozumunun de vfN sozluk notu var");
+
+                // ---- v8.1: MEKANİZMA KIRILIMI — sayılar tutarlı mı? ----
+                // "N/M çözüldü" sayısının iç yapısı: çözülenler hangi kanıtla,
+                // kalanlar hangi dürüst nedenle?
+                const DevirtPro::Stats& st = dp.GetStats();
+                CHECK(st.universe > 0, "kirilim: evren dolu (%zu)", st.universe);
+                CHECK(st.resolved == st.byCtor + st.byAtlas + st.byTier3 +
+                                     st.byIat + st.byConc,
+                      "kirilim: cozulen kategori toplami = cozulen (%zu+%zu+%zu+%zu+%zu vs %zu)",
+                      st.byCtor, st.byAtlas, st.byTier3, st.byIat, st.byConc,
+                      st.resolved);
+                CHECK(st.universe == st.resolved + st.unMultiCand +
+                                     st.unNoProof + st.unTier3Win,
+                      "kirilim: evren = cozulen + kalanlar (%zu vs %zu)",
+                      st.universe, st.resolved + st.unMultiCand + st.unNoProof +
+                                   st.unTier3Win);
+                CHECK(st.byCtor >= 2, "kirilim: kurucu-kanitli cozumler var (%zu)",
+                      st.byCtor);
+                CHECK(st.byAtlas >= 1, "kirilim: atlas inversiyonu vakasi (%zu)",
+                      st.byAtlas);
+                CHECK(st.byTier3 >= 1, "kirilim: tier-3 unicorn vakasi (%zu)",
+                      st.byTier3);
+                CHECK(st.byIat >= 1, "kirilim: IAT import cozumu var (%zu)",
+                      st.byIat);
+                CHECK(st.unMultiCand >= 1,
+                      "kirilim: muğlak vaka coklu-aday olarak kaldi (%zu)",
+                      st.unMultiCand);
+                delete pe;
+            }
+        } else {
+            std::printf("     (fixture_devirt.exe yok — v8 testleri atlandi)\n");
+        }
+    }
+
     std::printf("\n== SONUC: %d PASS, %d FAIL ==\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

@@ -107,8 +107,14 @@ bool Emulator::SetupStackAndPeb() {
     u64 sp = cfg_.stackTop - 0x100;
     u64 magicRet = magicPage;
     uc_mem_write(uc_, sp, (u8*)&magicRet, 8);
-    uc_reg_write(uc_, UC_X86_REG_RSP, &sp);
-
+    // v8 DÜZELTME: x86-32'de yazmaç ESP'dir — RSP kimliği yazmak 32-bit
+    // modda işaretçiyi bozuyordu (push'lar unmapped'e düşüyordu)
+    if (arch_ == Arch::X86_64)
+        uc_reg_write(uc_, UC_X86_REG_RSP, &sp);
+    else {
+        u32 sp32 = (u32)sp;
+        uc_reg_write(uc_, UC_X86_REG_ESP, &sp32);
+    }
     // PEB-lite + TEB-lite: gs:[0] = TEB, TEB+0x60 = PEB
     u64 tebVa = magicPage + 0x2000;
     uc_mem_map(uc_, tebVa & ~0xFFFull, 0x2000, UC_PROT_ALL);
@@ -196,12 +202,25 @@ void Emulator::HookCode(uc_engine* uc, uint64_t address, uint32_t size, void* ud
             }
         }
         // stub bulunamadı (bilinmeyen shadow adresi): ret gibi davran
-        u64 rsp = 0, retAddr = 0;
-        uc_reg_read(uc, UC_X86_REG_RSP, &rsp);
-        uc_mem_read(uc, rsp, (u8*)&retAddr, 8);
-        rsp += 8;
-        uc_reg_write(uc, UC_X86_REG_RSP, &rsp);
-        uc_reg_write(uc, UC_X86_REG_RIP, &retAddr);
+        // v8 DÜZELTME: x86-32'de dönüş adresi 4 bayttır (önceden hep 8 okunup
+        // rsp+=8 yapılıyordu — 32-bit yığını bozuyordu)
+        {
+            u64 rsp = 0, retAddr = 0;
+            if (self->arch_ == Arch::X86_64) {
+                uc_reg_read(uc, UC_X86_REG_RSP, &rsp);
+                uc_mem_read(uc, rsp, (u8*)&retAddr, 8);
+                rsp += 8;
+                uc_reg_write(uc, UC_X86_REG_RSP, &rsp);
+            } else {
+                u32 esp = 0, ret32 = 0;
+                uc_reg_read(uc, UC_X86_REG_ESP, &esp);
+                uc_mem_read(uc, esp, (u8*)&ret32, 4);
+                esp += 4;
+                uc_reg_write(uc, UC_X86_REG_ESP, &esp);
+                retAddr = ret32;
+            }
+            uc_reg_write(uc, UC_X86_REG_RIP, &retAddr);
+        }
         return;
     }
 
@@ -212,7 +231,11 @@ void Emulator::HookCode(uc_engine* uc, uint64_t address, uint32_t size, void* ud
         return;
     }
 
-    // 3) instruction trace
+    // 3) instruction trace / v8: yalnız-sayaç modu
+    if (self->cfg_.insCountOnly) {
+        self->executed_++;
+        return;
+    }
     if (self->cfg_.traceEnabled && self->trace_.size() < self->cfg_.traceLimit) {
         TraceEntry t;
         t.addr = address;
@@ -225,7 +248,13 @@ void Emulator::HookCode(uc_engine* uc, uint64_t address, uint32_t size, void* ud
                 cs_free(ins, 1);
             }
         }
-        uc_reg_read(uc, UC_X86_REG_RSP, &t.rsp);
+        if (self->arch_ == Arch::X86_64)
+            uc_reg_read(uc, UC_X86_REG_RSP, &t.rsp);
+        else {
+            u32 esp = 0;
+            uc_reg_read(uc, UC_X86_REG_ESP, &esp);
+            t.rsp = esp;
+        }
         self->trace_.push_back(std::move(t));
     }
 }
@@ -238,9 +267,10 @@ void Emulator::HookMemInvalid(uc_engine* uc, uc_mem_type type, uint64_t address,
     m.write = (type == UC_MEM_WRITE);
     m.invalid = true;
     self->faults_.push_back(m);
-    LogErr("ERISIM IHMALI: %s 0x%llx (%d bayt) @ rip=0x%llx",
-           type == UC_MEM_WRITE ? "YAZMA" : type == UC_MEM_READ ? "OKUMA" : "CALISTIRMA",
-           (unsigned long long)address, size, (unsigned long long)self->CurrentPc());
+    if (!self->cfg_.quiet)
+        LogErr("ERISIM IHMALI: %s 0x%llx (%d bayt) @ rip=0x%llx",
+               type == UC_MEM_WRITE ? "YAZMA" : type == UC_MEM_READ ? "OKUMA" : "CALISTIRMA",
+               (unsigned long long)address, size, (unsigned long long)self->CurrentPc());
     uc_emu_stop(uc);
     // işlemi durduruldu (uc_emu_stop çağrıldı)
 }
@@ -268,13 +298,19 @@ bool Emulator::Run(u64 startVa, u64 untilVa, u64 timeoutUs, size_t maxIns) {
     u64 magicRet = finishedMagic_;
     u64 sp = cfg_.stackTop - 0x100;
     uc_mem_write(uc_, sp, (u8*)&magicRet, 8);
-    uc_reg_write(uc_, UC_X86_REG_RSP, &sp);
+    if (arch_ == Arch::X86_64)
+        uc_reg_write(uc_, UC_X86_REG_RSP, &sp);
+    else {
+        u32 sp32 = (u32)sp;   // v8: x86-32'de ESP yaz (RSP kimliği bozuyordu)
+        uc_reg_write(uc_, UC_X86_REG_ESP, &sp32);
+    }
 
     uc_err err = uc_emu_start(uc_, startVa, untilVa, timeoutUs, maxIns);
     if (err != UC_ERR_OK && !finished_) {
         lastErr_ = std::string(uc_strerror(err));
-        LogWarn("Emulasyon durdu: %s (rip=0x%llx)", lastErr_.c_str(),
-                (unsigned long long)CurrentPc());
+        if (!cfg_.quiet)
+            LogWarn("Emulasyon durdu: %s (rip=0x%llx)", lastErr_.c_str(),
+                    (unsigned long long)CurrentPc());
         return false;
     }
     return true;
@@ -349,6 +385,17 @@ u64 Emulator::AllocHeap(size_t size) {
     if (next > cfg_.heapBase + cfg_.heapSize) return 0;
     heapCursor_ = next;
     return va;
+}
+
+bool Emulator::MapRegion(u64 base, size_t size) {
+    if (!uc_) return false;
+    u64 b = base & ~0xFFFull;
+    u64 e = (base + size + 0xFFF) & ~0xFFFull;
+    if (uc_mem_map(uc_, b, e - b, UC_PROT_ALL) != UC_ERR_OK) {
+        lastErr_ = "bolge map edilemedi";
+        return false;
+    }
+    return true;
 }
 
 } // namespace gt

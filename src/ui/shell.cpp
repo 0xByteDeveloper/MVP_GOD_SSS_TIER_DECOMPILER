@@ -226,17 +226,34 @@ void Shell::CmdStrings(const std::vector<std::string>& a) {
     if (!shown) LogInfo("Kosula uyan string yok (toplam %zu)", strs.size());
 }
 
-void Shell::CmdFuncs(const std::vector<std::string>&) {
+void Shell::CmdFuncs(const std::vector<std::string>& a) {
     if (!RequireBinary()) return;
     EnsureAnalyzed();
+    // v7: funcs <filtre> — PDB/DWARF isimleriyle ara (alt-string, büyük/küçük
+    // harf duyarsız; mangled ve demangled üstünden). Gerçek binary'de
+    // "funcs playerGetStatus" / "funcs CPythonPlayer" vakaları.
+    std::string filt;
+    if (!a.empty()) {
+        filt = a[0];
+        for (auto& c : filt) c = (char)tolower((unsigned char)c);
+    }
     LogLine(LogColor::Cyan, "== FONKSIYONLAR ==========================================");
-    size_t n = 0;
+    if (!filt.empty())
+        LogInfo("filtre: \"%s\"", a[0].c_str());
+    size_t n = 0, total = 0;
     for (auto& [va, f] : az_->Functions()) {
+        if (!filt.empty()) {
+            std::string nm = f.name;
+            for (auto& c : nm) c = (char)tolower((unsigned char)c);
+            if (nm.find(filt) == std::string::npos) continue;
+        }
+        total++;
         if (n++ >= 200) { LogLine(LogColor::Gray, "  ... (daha fazla icin xref/dis kullanin)"); break; }
-        Log("  0x%-12llx %-40s %5zu komut%s\n", (unsigned long long)va,
+        Log("  0x%-12llx %-52s %5zu komut%s\n", (unsigned long long)va,
             f.name.c_str(), f.insCount, f.fromSymbol ? "  [sembol]" : "");
     }
-    LogLine(LogColor::Gray, "  toplam: %zu fonksiyon", az_->Functions().size());
+    LogLine(LogColor::Gray, "  toplam: %zu fonksiyon%s", total,
+            filt.empty() ? "" : " (filtre eslesen)");
 }
 
 } // namespace gt

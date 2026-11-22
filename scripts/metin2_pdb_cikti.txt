@@ -1,0 +1,109 @@
+[95m  ____        ______                    _____            _        _    [0m
+[95m |_  /  ___  |_   _|_ __ _   _ ___    |_   _|_ __  ___| |_ __ _| |__ | | ___[0m
+[95m  / /  / _ \   | |/ _| '_ \ / | '_ \____| || '_ \/ _ \ __/ _` | '_ \| |/ _ \[0m
+[95m / /__| (_) |  | | (_| | | | \ | | |_____| || | |\  __/ || (_| | |_) | |  __/[0m
+[95m/____|\___/   |_|\__,_| |_| |_|_|_|    |_||_| |_|\___|\__\__,_|_.__/|_|\___|[0m
+[96m        MEGA GOD SSS TIER Binary Analiz Motoru  |  Capstone + Keystone + Unicorn[0m
+[90m        i4M ekosisteminin yeni nesli — PE/ELF | mapper | emulasyon | pseudocode[0m
+[96m[*][0m Komutlar icin 'help', klasik menu icin 'menu' yazin. Cikis: quit
+[95mgt> [0m[95m>> load /home/z/my-project/research/metin2/metin2client.exe[0m
+[92m[+][0m Yuklendi: /home/z/my-project/research/metin2/metin2client.exe
+[96m== DOSYA BILGISI =========================================[0m
+  Format        : PE32 (x86)
+  Mimari        : x86 (32-bit)
+  Boyut         : 5216256 bayt
+  ImageBase     : 0x400000
+  ImageSize     : 0x542000
+  Entry Point   : 0x639b82
+  Section       : 6
+  Import        : 19 dll / 587 fonksiyon
+  Export        : 2
+  Sembol        : 2
+  Relocation    : 82297
+[93m  PDB           : C:\Users\runneradmin\Desktop\MuratKCSource\vs_files\UserInterface\Release\metin2client.pdb[0m
+                GUID: ED283A58ADF0564689B0EEAE8C79D1CA00000001
+  Subsystem     : 2 (windows gui)
+  DLL mi        : hayir
+  Timestamp     : 1686464304
+[95m>> pdb /home/z/my-project/research/metin2/metin2client.pdb[0m
+[96m[*][0m Fonksiyon keşfi (semboller + entry + call hedefleri)...
+[96m[*][0m Bulunan aday: 11116 fonksiyon
+[96m[*][0m Recursive traversal disassembly...
+[96m[*][0m String taraması (ASCII + UTF-16LE)...
+[92m[+][0m Analiz bitti: 11116 fonksiyon, 694080 komut, 124336 xref, 18915 string
+[96m[*][0m Imza havuzlari tarandi (1 dosya) — eslesme yok
+[96m[*][0m PDB: 176018 tip, 23479 fonksiyon, 4434 global (GUID 583A28ED-F0AD-4656-89B0EEAE8C79D1CA)
+[92m[+][0m PDB yuklendi: 176018 tip, 23479 fonksiyon, 4434 global (GUID 583A28ED-F0AD-4656-89B0EEAE8C79D1CA)
+[92m[+][0m Fonksiyon isimleri uygulandi: 23479
+[96m[*][0m Tip veritabani PDB kanaliyla yeniden kurulacak (types/decomp komutlari)
+[95m>> funcs playerGetStatus[0m
+[96m== FONKSIYONLAR ==========================================[0m
+[96m[*][0m filtre: "playerGetStatus"
+  0x4ead70       playerGetStatus                                         46 komut  [sembol]
+[90m  toplam: 1 fonksiyon (filtre eslesen)[0m
+[95m>> decomp 0x4EAD70[0m
+[96m[*][0m rtti: 892 sinif, 7282 vftable slotu geri kazanildi
+[96m[*][0m rtti: +1525 sanal metod fonksiyonu kesfedildi (vtable slotlari)
+[96m[*][0m devirt-pro: 111 statik nesne yazicisi, 50 tanesi vtable kanitli
+[92m[+][0m Emulator hazir: goruntu 0x400000 + stack + heap (Unicorn 2.1)
+[96m[*][0m devirt-pro: 4444/9160 dolayli cagri statik cozuldu (tier-1: 4188, tier-3 unicorn: 256, 2.1s)
+[96m[*][0m devirt-pro kirilim: kurucu-kanit 245, atlas 236, unicorn 256, IAT 3222, vtablesiz-somut 485
+[96m[*][0m devirt-pro kalanlar: coklu-aday(durust) 128, kanit-yok (heap/param alici) 471, tier-3-pencere 4117
+// ============================================================
+// playerGetStatus  (46 komut, x86-32)
+// kapsam: 0x4ead70 - 0x4eadee
+// ============================================================
+_object * playerGetStatus(_object * poSelf, _object * poArgs)
+{
+    int iType;
+    int v2;
+    int v3;
+    int v4;
+    int v5;
+
+    v2 = PyTuple_GetInteger(poArgs, 0, &iType);
+    if (v2 != 0) goto loc_4ead97;
+    return Py_BuildException(0);
+loc_4ead97:
+    v3 = CPythonPlayer::Instance().GetStatus(iType);   // Instance() geri kazanildi: singleton kalibi (PDB sembolu, taban ayari +0x gizlendi)   // devirt-pro: CPythonPlayer vftable[4] (kurucu vtable-saklama kaniti)
+    if (iType != 0x11) goto loc_4eadda;
+    v4 = CPythonPlayer::Instance().NEW_GetMainActorPtr();   // Instance() geri kazanildi: singleton kalibi (PDB sembolu, taban ayari +0x gizlendi)   // devirt-pro: CPythonPlayer vftable[34] (kurucu vtable-saklama kaniti)
+    if (v4 == 0) goto loc_4eadda;
+    v5 = v4->GetWeaponType();
+    if (v5 != 3) goto loc_4eadda;
+loc_4eadda:
+    return python27.dll.Py_BuildValue("i", (v3 - *(TWOHANDED_WEWAPON_ATT_SPEED_DECREASE_VALUE)));   // devirt-pro: IAT import cagrisi (dll.api)
+}
+[95m>> devirt 0x4eada9[0m
+[96m== DEVRIT-PRO: 0x4eada9 ===========================[0m
+    0x4eada9: hedef = 0x4e2f60
+    call -> CPythonPlayer::GetStatus  [STATIK COZUM]
+[92m  >> COZUM: CPythonPlayer::GetStatus (0x4e2f60)[0m
+     sinif: CPythonPlayer, slot 4, vftable 0x805054
+     kanit: CPythonPlayer vftable[4] (kurucu vtable-saklama kaniti)
+[95m>> devirt 0x4eadbe[0m
+[96m== DEVRIT-PRO: 0x4eadbe ===========================[0m
+    0x4eadbe: hedef = 0x4e26f0
+    call -> CPythonPlayer::NEW_GetMainActorPtr  [STATIK COZUM]
+[92m  >> COZUM: CPythonPlayer::NEW_GetMainActorPtr (0x4e26f0)[0m
+     sinif: CPythonPlayer, slot 34, vftable 0x805054
+     kanit: CPythonPlayer vftable[34] (kurucu vtable-saklama kaniti)
+[95m>> devirt stats[0m
+== DEVRIT-PRO KIRILIM: nasil cozuldu / neden cozulemedi ==
+  evren: 9160 dolayli cagri | cozulen: 4444 | kalan: 4716
+  -- cozulenler (kanit mekanizmasi) --
+    kurucu vtable-saklama kaniti : 245
+    atlas inversiyonu (CHA)      : 236
+    tier-3 unicorn pencere emu.  : 256
+    IAT importu (dll.api)        : 3222
+    vtable'siz somut zincir      : 485
+  -- kalanlar (dürüst neden etiketleri) --
+    coklu aday (tekil tahmin yok): 128
+    kanit yok (heap/param alici) : 471
+    tier-3 pencere yetersiz      : 4117
+  not: 'tier-3 pencere yetersiz' = unicorn da denendi ama tohum/yol
+       yok — alici statik kanit tasimiyor (heap/parametre); bu
+       grubun buyuk cogunlugu kanit-yok sinifidir
+[95m>> quit[0m
+[92m[+][0m Script bitti (10 satir)
+[95mgt> [0m[95mGOD TIER kapaniyor. Yine bekleriz![0m

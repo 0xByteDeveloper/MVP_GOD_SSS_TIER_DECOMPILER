@@ -83,6 +83,8 @@ private:
     void CmdSave(const std::vector<std::string>& a);
     void CmdProc(const std::vector<std::string>& a);
     void CmdPdb(const std::vector<std::string>& a);
+    void CmdRtti(const std::vector<std::string>& a);      // v7: RTTI atlası
+    void CmdDevirt(const std::vector<std::string>& a);    // v7: devirt-pro
     void CmdDeep(const std::vector<std::string>& a);      // v4: derin keşif
     void CmdSig(const std::vector<std::string>& a);       // v4: imza motoru
     void CmdLumina(const std::vector<std::string>& a);    // v6: isim havuzu

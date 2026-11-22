@@ -1,0 +1,8 @@
+# i4M GodTier v8 — METIN2 PDB'SIZ KANIT (saf RTTI + statik kanıt)
+# Sembolsiz ortamda devirt + Instance() geri kazanımı
+load /home/z/my-project/research/metin2/metin2client.exe
+decomp 0x4EAD70
+devirt 0x4eada9
+devirt 0x4eadbe
+devirt stats
+quit

@@ -1588,6 +1588,13 @@ const TypeInferer::VTable* TypeInferer::VTableOfClass(
 
 TypeInferer::DevirtResult TypeInferer::TryDevirtualize(u64 callAddr) const {
     DevirtResult R;
+    // ---- v7 Strateji 0: DEVRİT-PRO kanıtı (RTTI + singleton zinciri) ----
+    // virtCalls_ üyeliği GEREKTİRMEZ: PE32'de sanal-çağrı desen yakalayıcısı
+    // farklı çalışır; pencere değerlendiricisi zaten kanıtı üretmiştir.
+    {
+        auto fit = devirtFacts_.find(callAddr);
+        if (fit != devirtFacts_.end()) return fit->second;
+    }
     auto it = virtCalls_.find(callAddr);
     if (it == virtCalls_.end()) return R;
     const VirtCall& vc = it->second;
@@ -1681,6 +1688,27 @@ void TypeInferer::DetectVirtualCalls(const std::map<u64, BodyInfo>& bodies) {
 const TypeInferer::VirtCall* TypeInferer::VirtCallAt(u64 callAddr) const {
     auto it = virtCalls_.find(callAddr);
     return it == virtCalls_.end() ? nullptr : &it->second;
+}
+
+void TypeInferer::RegisterDevirtFact(u64 callAddr, u64 target,
+                                     const std::string& name,
+                                     const std::string& why, u64 vftVa,
+                                     int slot, const std::string& className,
+                                     const std::string& proofKind) {
+    DevirtResult r;
+    r.target = target;
+    r.methodName = name;
+    r.why = why;
+    r.vftVa = vftVa;               // v8.1: vfN sözlüğü koordinatları
+    r.slot = slot;
+    r.className = className;
+    r.proofKind = proofKind;
+    devirtFacts_[callAddr] = r;
+}
+
+const TypeInferer::DevirtResult* TypeInferer::DevirtFactAt(u64 callAddr) const {
+    auto it = devirtFacts_.find(callAddr);
+    return it == devirtFacts_.end() ? nullptr : &it->second;
 }
 
 } // namespace gt

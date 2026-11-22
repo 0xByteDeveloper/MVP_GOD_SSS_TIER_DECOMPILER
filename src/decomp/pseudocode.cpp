@@ -1821,6 +1821,17 @@ std::string Pseudocoder::DecompileFunction(u64 start) {
     const DwarfInfo* dwarf = ti.Dwarf();
     const bool isElf = az_.Bin().FormatName().find("ELF") != std::string::npos;
 
+    // v7: x86-32 (PE32 cdecl/thiscall) kendi pseudocode yolunu kullanır —
+    // 64-bit Folder SysV/Win64 register argümanlıdır; 32-bit yığın argütları
+    // + devirt-pro sonuçlarıyla Hex-Rays üslubu üretir.
+    if (az_.Engine().GetArch() == Arch::X86_32) {
+        std::string r = Decompile32(start);
+        if (!r.empty()) return r;
+        // (düşme: 32-bit yol başarısızsa dürüst mesaj)
+        return std::string("// ============================================================\n") +
+               "// " + az_.NameFor(start) + "\n// x86-32 pseudocode kurulamadi\n";
+    }
+
     // ---- başlık ----
     std::string fname = az_.NameFor(start);
     std::string sigLine;
@@ -3728,6 +3739,848 @@ std::string Pseudocoder::BridgeGhidra(const std::string& filePath, const std::st
     while (fgets(buf, sizeof(buf), p)) logo += buf;
     pclose(p);
     return "[kopru] Ghidra headless tamam -> " + outPath + "\n" + logo.substr(0, 2000);
+}
+
+// ----------------------------------------------------------------------------
+// v7: RTTI atlası + DEVRİT-PRO (lazy) + x86-32 pseudocode yolu
+// ----------------------------------------------------------------------------
+MsvcRtti& Pseudocoder::Rtti() {
+    if (!rtti_) {
+        rtti_ = std::make_unique<MsvcRtti>(az_);
+        rtti_->Build();
+        // v8: RTTI-GÜDÜMLÜ FONKSİYON KEŞFİ — vtable slotları GERÇEK kod
+        // adreslerini gösterir; doğrudan çağrılmayan sanal metotlar (yalnız
+        // vtable'dan referanslı: CPythonPlayer::GetStatus gibi) böylece
+        // fonksiyon evrenine girer → devirt/decompile kapsamı genişler.
+        size_t added = 0;
+        std::set<u64> seen;
+        for (auto& c : rtti_->Classes())
+            for (u64 t : c.slots) {
+                if (!t || !seen.insert(t).second) continue;
+                if (!az_.FunctionStart(t)) {
+                    if (!az_.DisassembleFunction(t).empty()) added++;
+                }
+            }
+        if (added)
+            LogInfo("rtti: +%zu sanal metod fonksiyonu kesfedildi (vtable slotlari)",
+                    added);
+    }
+    return *rtti_;
+}
+
+DevirtPro& Pseudocoder::Devirt() {
+    if (!devirtPro_) {
+        devirtPro_ = std::make_unique<DevirtPro>(az_, TI(), Rtti());
+        devirtPro_->Build();
+        // kanıtları TypeInferer'a taşı: TryDevirtualize strateji-0 olarak
+        // servis eder (dolaylı çağrı render'ı otomatik statikleşir)
+        for (auto& [a, r] : devirtPro_->Results())
+            if (r.resolved)
+                TI().RegisterDevirtFact(a, r.target, r.name, r.why, r.vftVa,
+                                        r.slot, r.className, r.proofKind);
+    }
+    return *devirtPro_;
+}
+
+// ---- x86-32 ifade katlayıcı (PE32 cdecl/thiscall/stdcall) -------------------
+namespace {
+
+// MSVC veri sembolü basit demangle (devirtpro.cpp ile aynı kurallar):
+// "?ms_singleton@?$CSingleton@VX@@@@0PA" → "CSingleton<X>::ms_singleton"
+std::string Pc32DemangleData(const std::string& m) {
+    if (m.empty() || m[0] != '?') return m;
+    std::string body = m.substr(1);
+    size_t at = body.find('@');
+    if (at == std::string::npos) return m;
+    std::string name = body.substr(0, at);
+    std::string rest = body.substr(at + 1);
+    if (rest.empty()) return name;
+    if (rest.rfind("?$", 0) == 0) {
+        size_t at2 = rest.find('@', 2);
+        if (at2 != std::string::npos) {
+            std::string tname = rest.substr(2, at2 - 2);
+            std::string after = rest.substr(at2 + 1);
+            if (!after.empty() && after[0] == 'V') {
+                size_t at3 = after.find('@', 1);
+                if (at3 != std::string::npos)
+                    return tname + "<" + after.substr(1, at3 - 1) + ">::" + name;
+            }
+        }
+    } else if (rest[0] != '@') {
+        size_t dd = rest.find("@@");
+        if (dd != std::string::npos && dd > 0)
+            return rest.substr(0, dd) + "::" + name;
+    }
+    return name;
+}
+
+class Folder32 {
+public:
+    Folder32(Analyzer& az, TypeInferer& ti, u64 funcVa)
+        : az_(az), ti_(ti), funcVa_(funcVa) {
+        regs_["rax"] = regs_["rcx"] = regs_["rdx"] = regs_["rbx"] =
+        regs_["rsp"] = regs_["rbp"] = regs_["rsi"] = regs_["rdi"] = "";
+        // PDB global sembol haritası (VA -> demangle edilmiş ad)
+        if (const PdbInfo* pdb = ti_.Pdb())
+            for (auto& g : pdb->Globals())
+                if (g.va) globalsByVa_[g.va] = Pc32DemangleData(
+                    !g.name.empty() && g.name[0] != '?' ? g.name : g.mangled);
+    }
+
+    // [ebp+D] çözümü: arg (D>=8) / yerel (D<0, yazılmış) / vN
+    std::string FrameRef(i64 d, bool write) {
+        if (d >= 8 && (d - 8) % 4 == 0) {
+            int idx = (int)((d - 8) / 4);
+            EnsureArg(idx);
+            return args_[idx];
+        }
+        if (write || locals_.count(d)) return Local(d);
+        return Local(d);   // okuma: tanımlanacak
+    }
+    std::string Local(i64 d) {
+        auto it = locals_.find(d);
+        if (it != locals_.end()) return it->second.name;
+        // PDB yerel adı varsa gerçek adı kullan
+        std::string nm = "v" + std::to_string(++nLoc_);
+        if (const PdbInfo* pdb = ti_.Pdb()) {
+            for (auto& f : pdb->Funcs()) {
+                if (f.va != funcVa_) continue;
+                for (auto& l : f.locals) {
+                    if (!l.isArg && l.off == (i32)d && !l.name.empty()) {
+                        nm = l.name; break;
+                    }
+                }
+                break;
+            }
+        }
+        LocalVar lv; lv.name = nm; lv.type = "int";
+        locals_[d] = lv;
+        return nm;
+    }
+    void EnsureArg(int idx) {
+        while ((int)args_.size() <= idx) {
+            int i = (int)args_.size();
+            std::string nm = "a" + std::to_string(i + 1);
+            if (const PdbInfo* pdb = ti_.Pdb()) {
+                for (auto& f : pdb->Funcs()) {
+                    if (f.va != funcVa_) continue;
+                    if ((size_t)i < f.argNames.size() && !f.argNames[i].empty())
+                        nm = f.argNames[i];
+                    break;
+                }
+            }
+            args_.push_back(nm);
+        }
+    }
+    std::string Reg(const std::string& canon) {
+        auto it = regs_.find(canon);
+        return it == regs_.end() ? "" : it->second;
+    }
+    // v7: ERTELENMİŞ ÇAĞRI MALZEMELEŞMESİ — çağrı ifadesi ilk OKUNUŞUNDA
+    // vN değişkenine bağlanır (body'ye "vN = çağrı;" basılır). Böylece
+    // her çağrı dosyada TEK kez gösterilir: koşul/argüman/return hep vN.
+    std::string UseVal(const std::string& canon) {
+        std::string v = Reg(canon);
+        if (v.empty() || pendingCall_.empty() || v != pendingCall_) return v;
+        std::string var = "v" + std::to_string(++nLoc_);
+        temps_.push_back(var);
+        // kanıt notunu ('   // devirt-pro: ...') ';'nin SONRASINA al —
+        // geçerli C sözdizimi kalsın
+        std::string core = v, note;
+        size_t np = v.find("   //");
+        if (np != std::string::npos) {
+            core = v.substr(0, np);
+            note = v.substr(np);
+        }
+        if (onMat) onMat(var + " = " + core + ";" + note);
+        for (auto& kv : regs_)
+            if (kv.second == pendingCall_) kv.second = var;
+        pendingCall_.clear();
+        return var;
+    }
+    void ConsumePending() { pendingCall_.clear(); }
+    const std::string& Pending() const { return pendingCall_; }
+    void SetPending(const std::string& e) { pendingCall_ = e; }
+    void SetReg(const std::string& canon, const std::string& e) {
+        if (regs_.count(canon)) regs_[canon] = e;
+    }
+    // bellek erişim ifadesi: [reg+K] / [rbp+D] / [imm]
+    // (NOT: ParseMem taban adlarını CANON yapar: ebp→rbp, edi→rdi)
+    std::string MemExpr(const MemOp& m, const Ins& x) {
+        if (m.base == "rbp" && m.index.empty()) return FrameRef(m.disp, false);
+        if (m.base == "rsp" && m.index.empty()) return "sp_" + ToHex((u64)m.disp);
+        if (m.base.empty() && m.index.empty()) {
+            // mutlak / IAT / veri sembolü
+            if (az_.Bin().Imports().size() && m.disp) {
+                for (auto& d : az_.Bin().Imports())
+                    for (auto& f : d.funcs)
+                        if (f.iatVa == (u64)m.disp && !f.name.empty())
+                            return "&" + d.name + "." + f.name;
+            }
+            // PDB global sembolü (ms_singleton, TWOHANDED_... gibi)
+            auto git = globalsByVa_.find((u64)m.disp);
+            if (git != globalsByVa_.end()) return "*(" + git->second + ")";
+            std::string nm = az_.SymbolOrLabel((u64)m.disp);
+            std::string addr = "0x" + ToHex((u64)m.disp);
+            if (!nm.empty() && nm != addr && nm.find("loc_") != 0 &&
+                nm.find("sub_") != 0)
+                return nm;
+            return "*(" + addr + ")";
+        }
+        std::string b = Reg(m.base.empty() ? "" : m.base);
+        if (m.base == "rdi" || m.base == "rsi" || m.base == "rbx") {
+            // sık görülen this-taşima alışkanlığı: this->alan
+            if (thisRegs_.count(m.base) && !b.empty() && b != m.base) {
+                std::string idx = m.index.empty() ? "" :
+                    "[" + (Reg(m.index).empty() ? m.index : Reg(m.index)) +
+                    (m.scale > 1 ? "*" + std::to_string(m.scale) : "") + "]";
+                return b + "->field_" + ToHex((u64)(m.disp < 0 ? 0 : m.disp)) + idx;
+            }
+        }
+        std::string base = b.empty() ? m.base : b;
+        if (!m.index.empty()) {
+            base += " + " + (Reg(m.index).empty() ? m.index : Reg(m.index));
+            if (m.scale > 1) base += "*" + std::to_string(m.scale);
+        }
+        if (m.disp) base += (m.disp > 0 ? " + 0x" : " - 0x") +
+                            ToHex((u64)(m.disp < 0 ? -m.disp : m.disp));
+        return "*(" + base + ")";
+    }
+    void MarkThis(const std::string& canon) { thisRegs_.insert(canon); }
+
+    std::vector<std::string>& pushed() { return pushed_; }
+    int nLocals() const { return nLoc_; }
+
+    struct LocalVar { std::string name, type; };
+    std::map<i64, LocalVar> locals_;
+    std::vector<std::string> args_;
+    std::vector<std::string> temps_;              // malzemeleşen çağrı değişkenleri
+    std::function<void(const std::string&)> onMat;  // body'ye basma kancası
+    std::string pendingCall_;                     // henüz okunmamış çağrı ifadesi
+
+private:
+    Analyzer& az_;
+    TypeInferer& ti_;
+    u64 funcVa_;
+    std::map<std::string, std::string> regs_;
+    std::set<std::string> thisRegs_;
+    std::map<u64, std::string> globalsByVa_;   // PDB global VA -> ad
+    std::vector<std::string> pushed_;
+    int nLoc_ = 0;
+};
+
+} // namespace
+
+std::string Pseudocoder::Decompile32(u64 start) {
+    std::vector<Ins> ins = az_.DisassembleFunction(start, (size_t)opt_.maxInsPerFunc);
+    if (ins.empty()) return "";
+    TypeInferer& ti = TI();
+    // v7: devirt-pro kanıtlarını KUR (lazy — RTTI atlası + singleton taraması)
+    Devirt();
+    // PDB imzası (varsa) — PE32 isim/parametre zenginliği
+    const PdbFunc* pfn = nullptr;
+    if (const PdbInfo* pdb = ti.Pdb())
+        for (auto& f : pdb->Funcs())
+            if (f.va == start) { pfn = &f; break; }
+
+    Folder32 f(az_, ti, start);
+    std::vector<std::string> body;
+    std::vector<std::string> pushArgs;   // çağrı arg yığını (ifadeler)
+    f.onMat = [&](const std::string& s) { body.push_back("    " + s); };
+    std::set<u64> jumpTargets;
+    for (auto& x : ins)
+        if (x.isJcc || x.isJmp) jumpTargets.insert(x.target);
+    bool eaxWritten = false;
+    // koşul parçaları: (lhs, op, rhs) — jcc anında BİRLEŞTİR
+    std::string cmpL, cmpOp, cmpR;
+    bool cmpIsTest = false;
+
+    auto isCalleeSave = [](const std::string& e) {
+        // açılmamış (ifadesiz) callee-save yazmaç push'u = arg DEĞİL (kaydet)
+        return e == "rsi" || e == "rdi" || e == "rbx" || e == "rbp" ||
+               e == "esi" || e == "edi" || e == "ebx" || e == "ebp";
+    };
+
+    // v8: SINGLETON KATLAMASI — metin2 kaynağındaki
+    // "CPythonPlayer::Instance().GetStatus(iType)" satırını geri kazanmak
+    // için: ilk arg "(*(CSingleton<T>::ms_singleton) + 0xK)" (PDB'li) veya
+    // "(*(0x8BD2D0) + 0xK)" (PDB'siz) kalıbındaysa VE +K ofsetindeki vptr
+    // kanıtı çözülen metodun sınıfıyla eşleşiyorsa → "T::Instance()".
+    // +K taban-ayarı MSVC çoklu-kalıtım detayıdır — kaynakta görünmez.
+    auto tryFoldSingleton = [&](const std::string& arg,
+                                const std::string& cls) -> std::pair<bool, std::string> {
+        if (arg.empty() || cls.empty()) return {false, ""};
+        std::string s = arg;
+        // dış parantezleri sıyır (dengeliyse)
+        while (s.size() >= 2 && s.front() == '(' && s.back() == ')') {
+            int d = 0; bool bal = true;
+            for (size_t i = 0; i < s.size(); i++) {
+                if (s[i] == '(') d++;
+                else if (s[i] == ')') { d--; if (d == 0 && i + 1 != s.size()) { bal = false; break; } }
+            }
+            if (!bal || d != 0) break;
+            s = s.substr(1, s.size() - 2);
+        }
+        std::string deref, tail;
+        if (s.rfind("*(", 0) == 0) {
+            size_t close = s.find(')');
+            if (close == std::string::npos) return {false, ""};
+            deref = s.substr(2, close - 2);
+            tail = s.substr(close + 1);
+        } else if (s.rfind("dword_", 0) == 0 || s.rfind("qword_", 0) == 0) {
+            size_t sp = s.find(' ');
+            if (sp == std::string::npos) { deref = s; }
+            else { deref = s.substr(0, sp); tail = s.substr(sp); }
+        } else return {false, ""};
+        // kuyruk: "+ 0xK" / "+ K" (ondalık) / "- ..."
+        i64 k = 0;
+        {
+            size_t p = tail.find_first_not_of(" \t");
+            if (p != std::string::npos) {
+                std::string t = tail.substr(p);
+                bool minus = (t[0] == '-');
+                if (t.rfind("+ 0x", 0) == 0 || (minus && t.rfind("- 0x", 0) == 0)) {
+                    u64 v = strtoull(t.substr(4).c_str(), nullptr, 16);
+                    k = minus ? -(i64)v : (i64)v;
+                } else if (t[0] == '+' || minus) {
+                    // ondalık: " + 4" (capstone add ecx, 4 böyle yazar)
+                    u64 v = strtoull(t.substr(1).c_str(), nullptr, 10);
+                    k = minus ? -(i64)v : (i64)v;
+                }
+            }
+        }
+        // yol 1 (PDB sembolü): "CSingleton<T>::ms_singleton"
+        if (deref.rfind("CSingleton<", 0) == 0 &&
+            deref.find(">::ms_singleton") != std::string::npos) {
+            const size_t b1 = 11;   // strlen("CSingleton<") — dikkat: 11!
+            size_t b2 = deref.find('>', b1);
+            if (b2 != std::string::npos) {
+                std::string T = deref.substr(b1, b2 - b1);
+                if (T == cls) return {true, cls + "::Instance()"};
+            }
+            return {false, ""};
+        }
+        // yol 2 (PDB'siz): "0xADDR" / "dword_ADDR" → statik-kanıt + RTTI
+        std::string hexpart;
+        if (deref.rfind("dword_", 0) == 0 || deref.rfind("qword_", 0) == 0)
+            hexpart = deref.substr(6);
+        else if (deref.rfind("0x", 0) == 0) hexpart = deref.substr(2);
+        if (hexpart.empty()) return {false, ""};
+        u64 sva = strtoull(hexpart.c_str(), nullptr, 16);
+        if (!sva || !devirtPro_) return {false, ""};
+        auto fv = devirtPro_->StaticView(sva);
+        if (!fv.proven) return {false, ""};
+        auto it = fv.vptrCand.find(k);
+        if (it == fv.vptrCand.end()) it = fv.vptrCand.find(0);
+        if (it == fv.vptrCand.end()) return {false, ""};
+        for (u64 vft : it->second) {
+            const RttiClass* rc = Rtti().ByVftable(vft);
+            if (rc && rc->name == cls) return {true, cls + "::Instance()"};
+        }
+        return {false, ""};
+    };
+
+    auto isPlainIdent = [](const std::string& s) {
+        if (s.empty()) return false;
+        for (char c : s)
+            if (!(isalnum((unsigned char)c) || c == '_')) return false;
+        return true;
+    };
+
+    // v8.1: fonksiyon-sonu vfN sözlüğü (callRender doldurur, footer basar)
+    std::map<int, std::string> vfGloss;
+
+    auto callRender = [&](size_t idx) -> std::string {
+        const Ins& x = ins[idx];
+        bool indirect = x.isIndirect;
+        // cdecl arg sayısı: çağrıdan SONRAKI "add esp, N" (stack cleanup)
+        int nargs = -1;
+        for (size_t j = idx + 1; j < ins.size() && j < idx + 16; j++) {
+            const std::string& m2 = ins[j].mnemonic;
+            if (ins[j].isCall) break;                    // temizlik yok (stdcall/thiscall)
+            if (m2 == "add" || m2 == "sub") {
+                auto o2 = SplitOps(ins[j].opStr);
+                if (o2.size() == 2 && o2[0] == "esp") {
+                    u64 n = strtoull(o2[1].c_str(), nullptr, 0);
+                    nargs = (int)((m2 == "add" ? n : (u64)0) / 4);
+                    if (m2 == "sub") nargs = 0;
+                    break;
+                }
+                break;                                  // esp'siz add: dur
+            }
+            if (m2 == "ret" || m2 == "leave") break;
+        }
+        // aday arg'lar: push edilenler (son çağrıdan beri), callee-save hariç
+        std::vector<std::string> cand;
+        for (auto& p : pushArgs)
+            if (!isCalleeSave(p)) cand.push_back(p);
+        pushArgs.clear();
+        std::vector<std::string> a;
+        if (nargs >= 0 && (size_t)nargs <= cand.size()) {
+            // cdecl: son N push'un TERSI (son push = ilk argüman)
+            a.assign(cand.end() - nargs, cand.end());
+            std::reverse(a.begin(), a.end());
+        } else {
+            a.assign(cand.rbegin(), cand.rend());   // thiscall/stdcall: hepsi ters
+        }
+        // devirt-kanıtı (strateji 0) — sanal çağrı STATİK çözülmüş mü?
+        std::string name;
+        bool devirted = false;
+        std::string candNote;   // dürüst çoklu-aday notu (çağrının SONUNA)
+        std::string vfNote;     // v8.1: vfN sözlük notu (vfN NE olan?)
+        const TypeInferer::DevirtResult* dvf = nullptr;
+        if (indirect) {
+            if ((dvf = ti.DevirtFactAt(x.addr)) != nullptr) {
+                if (dvf->target || !dvf->methodName.empty()) {
+                    name = dvf->methodName.empty() ? az_.NameFor(dvf->target)
+                                                  : dvf->methodName;
+                    devirted = true;
+                }
+            }
+        } else {
+            name = az_.NameFor(x.target);
+        }
+        if (!devirted && indirect) {
+            std::string op = SplitOps(x.opStr).empty() ? "?" : SplitOps(x.opStr)[0];
+            std::string e;
+            if (IsRegTok(op)) e = f.Reg(CanonReg(op));
+            else if (op.find('[') != std::string::npos)
+                e = f.MemExpr(ParseMem(op), x);
+            // IAT import adı: "&dll.api" → doğrudan dll.api göster
+            if (!e.empty() && e[0] == '&') name = e.substr(1);
+            else name = "(*" + (e.empty() ? op : e) + ")";
+            // v7 DÜRÜSTLÜK: çoklu-aday sanal çağrı — aday listesini göster
+            // (yanlış tekil tahmin YOK; kim olduğu belliyse yukarıda çözüldü)
+            if (devirtPro_) {
+                auto dit = devirtPro_->Results().find(x.addr);
+                if (dit != devirtPro_->Results().end() &&
+                    !dit->second.candidates.empty()) {
+                    std::string cl;
+                    for (auto& cn : dit->second.candidateNames) {
+                        if (!cl.empty()) cl += ", ";
+                        cl += cn;
+                    }
+                    candNote = "   // sanal kaldi: vtable[" +
+                               std::to_string(dit->second.slot) +
+                               "] adaylari: " + cl;
+                }
+            }
+        }
+        // thiscall: ecx = this → metot çağrısı olarak göster
+        std::string ecx = f.UseVal("rcx");
+        bool thisInjected = false;
+        if (devirted && !ecx.empty() && ecx != "rcx") {
+            a.insert(a.begin(), ecx);
+            thisInjected = true;
+        } else if (!devirted && !indirect) {
+            // thiscall sezgisi (doğrudan çağrı): ecx'te anlamalı ifade varsa
+            // ilk argüman (this) olarak göster — MSVC thiscall kuralı
+            if (!ecx.empty() && ecx != "rcx" && ecx != "ecx") {
+                a.insert(a.begin(), ecx);
+                thisInjected = true;
+            }
+        }
+        // v8: METOT SÖZDİZİMİ + Instance() KATLAMASI
+        //   CPlayer::vf4((*(0x403000) + 0x4), iType) → CPlayer::Instance().vf4(iType)
+        //   CInstanceBase::GetWeaponType(v4)          → v4->GetWeaponType()
+        std::string instanceNote;
+        std::string s;
+        bool foldedInstance = false;
+        if (thisInjected && !a.empty() && name.find("::") != std::string::npos) {
+            std::string cls = name.substr(0, name.find("::"));
+            std::string mth = name.substr(name.find("::") + 2);
+            auto fold = tryFoldSingleton(a[0], cls);
+            if (fold.first) {
+                s = fold.second + "." + mth + "(";
+                for (size_t i = 1; i < a.size(); i++) {
+                    if (i > 1) s += ", ";
+                    s += a[i].empty() ? "?" : a[i];
+                }
+                s += ")";
+                foldedInstance = true;
+                instanceNote = "   // Instance() geri kazanildi: singleton "
+                               "kalibi (" +
+                               std::string(ti.Pdb() ? "PDB sembolu" : "RTTI sinif kaniti") +
+                               ", taban ayari +0x gizlendi)";
+            } else if (isPlainIdent(a[0]) && !mth.empty()) {
+                name = a[0] + "->" + mth;
+                a.erase(a.begin());
+            }
+        }
+        if (!foldedInstance) {
+            s = name + "(";
+            for (size_t i = 0; i < a.size(); i++) {
+                if (i) s += ", ";
+                s += a[i].empty() ? "?" : a[i];
+            }
+            s += ")";
+        }
+        if (!candNote.empty()) s += candNote;
+        if (!instanceNote.empty()) s += instanceNote;
+        // v8.1: vfN SÖZLÜĞÜ — PDB'siz "vf4" adının NE olduğunu çağrının
+        // yanında kanıt koordinatlarıyla yaz: vfN = vtable slot N (x86-32:
+        // bayt ofseti 4*N). "vf4 = 0x8bd2d0" DEĞİL: 0x8bd2d0 singleton
+        // yuvasıdır; vf4 = vftable[slot*4] hedefidir.
+        if (devirted && dvf && name.find("::vf") != std::string::npos &&
+            dvf->vftVa && dvf->slot >= 0) {
+            char vb[176];
+            snprintf(vb, sizeof vb,
+                     "   // vf%d = %s vftable[0x%llx] + 0x%llx -> 0x%llx",
+                     dvf->slot, dvf->className.c_str(),
+                     (unsigned long long)dvf->vftVa,
+                     (unsigned long long)(dvf->slot * 4),
+                     (unsigned long long)dvf->target);
+            vfNote = vb;
+            s += vfNote;
+            // fonksiyon-sonu sözlüğü için topla (footer)
+            vfGloss[dvf->slot] = vfNote.substr(6);   // "   // " kırp
+        }
+        if (devirted && a.empty() == false)
+            if (const TypeInferer::DevirtResult* dv = ti.DevirtFactAt(x.addr))
+                s += "   // devirt-pro: " + dv->why;
+        for (auto* r : {"rax", "rcx", "rdx"})
+            f.SetReg(r, "");      // caller-saved temizliği
+        f.SetReg("rax", s);        // dönüş değeri = çağrı ifadesi (katlanır)
+        return s;
+    };
+
+    for (size_t xi = 0; xi < ins.size(); xi++) {
+        const Ins& x = ins[xi];
+        const std::string& mn = x.mnemonic;
+        auto ops = SplitOps(x.opStr);
+        bool isTarget = jumpTargets.count(x.addr) > 0;
+        if (isTarget && !mn.empty()) {
+            char lb[48];
+            snprintf(lb, sizeof lb, "loc_%llx:", (unsigned long long)x.addr);
+            body.push_back(std::string(lb));
+        }
+
+        if (x.isCall) {
+            // önceki çağrının değeri hiç okunmadıysa düz ifade olarak ver
+            if (!f.Pending().empty()) {
+                std::string pc = f.Pending(), pn;
+                size_t np = pc.find("   //");
+                if (np != std::string::npos) { pn = pc.substr(np); pc = pc.substr(0, np); }
+                body.push_back("    " + pc + ";" + pn);
+                f.ConsumePending();
+            }
+            f.SetPending(callRender(xi));
+            eaxWritten = false;
+            continue;
+        }
+        if (mn == "push") {
+            std::string e;
+            if (!ops.empty()) {
+                if (IsRegTok(ops[0])) e = f.UseVal(CanonReg(ops[0]));
+                else if (ops[0].find('[') != std::string::npos) {
+                    MemOp m = ParseMem(ops[0]);
+                    e = f.MemExpr(m, x);
+                } else if (IsNumberTok(ops[0])) {
+                    e = ops[0];
+                    // hazır değer string'e işaret ediyor olabilir ("i" formatı)
+                    u64 sv = strtoull(ops[0].c_str(), nullptr, 0);
+                    std::string s;
+                    if (az_.IsStringAt(sv, &s) && s.size() <= 12)
+                        e = "\"" + s + "\"";
+                    else {
+                        // kısa string sabiti (1-3 karakter): string taraması
+                        // >=4 karakter ister; Py_BuildValue("i", ...) gibi
+                        // formatları imajdan doğrudan oku
+                        u8 sb[8] = {};
+                        if (sv && az_.Image().ReadBytes(sv, sb, 8)) {
+                            int n = 0;
+                            while (n < 8 && sb[n] && sb[n] >= 0x20 && sb[n] < 0x7f)
+                                n++;
+                            if (n >= 1 && n < 8 && sb[n] == 0 && n <= 3) {
+                                s.assign((const char*)sb, (size_t)n);
+                                e = "\"" + s + "\"";
+                            }
+                        }
+                    }
+                } else e = ops[0];
+            }
+            pushArgs.push_back(e.empty() ? ops.empty() ? "?" : ops[0] : e);
+            continue;
+        }
+        if (mn == "pop") { continue; }
+        if (mn == "mov" && ops.size() == 2) {
+            const std::string& dst = ops[0];
+            const std::string& src = ops[1];
+            // this-tasima: mov edi/esi/ebx, ecx  → this işaretle
+            if (IsRegTok(dst) && IsRegTok(src) && CanonReg(src) == "rcx") {
+                std::string e = f.UseVal("rcx");
+                f.SetReg(CanonReg(dst), e.empty() ? CanonReg(dst) : e);
+                if (e.empty() || e == "ecx") {
+                    f.MarkThis(CanonReg(dst));
+                    f.SetReg(CanonReg(dst), "this");
+                }
+                continue;
+            }
+            if (dst.find('[') != std::string::npos) {
+                MemOp m = ParseMem(dst);
+                if (m.base == "rbp" && m.index.empty()) {
+                    std::string e;
+                    if (IsRegTok(src)) e = f.Reg(CanonReg(src));
+                    else e = src;
+                    if (e.empty()) e = IsRegTok(src) ? CanonReg(src) : src;
+                    body.push_back("    " + f.FrameRef(m.disp, true) + " = " + e + ";");
+                    continue;
+                }
+                std::string lhs = f.MemExpr(m, x);
+                std::string e = IsRegTok(src) ? f.Reg(CanonReg(src)) : src;
+                if (e.empty()) e = src;
+                body.push_back("    " + lhs + " = " + e + ";");
+                continue;
+            }
+            if (!IsRegTok(dst)) continue;
+            std::string dc = CanonReg(dst);
+            if (src.find('[') != std::string::npos) {
+                MemOp m = ParseMem(src);
+                f.SetReg(dc, f.MemExpr(m, x));
+            } else if (IsRegTok(src)) {
+                f.SetReg(dc, f.UseVal(CanonReg(src)));
+            } else {
+                f.SetReg(dc, src);
+            }
+            // rax üzerine yazılıyor: okunmamış çağrı değeri düz ifadeye dönsün
+            if (dc == "rax" && !f.Pending().empty() &&
+                f.Reg("rax") != f.Pending()) {
+                std::string pc = f.Pending(), pn;
+                size_t np = pc.find("   //");
+                if (np != std::string::npos) { pn = pc.substr(np); pc = pc.substr(0, np); }
+                body.push_back("    " + pc + ";" + pn);
+                f.ConsumePending();
+            }
+            if (dc == "rax") eaxWritten = true;
+            continue;
+        }
+        if (mn == "lea" && ops.size() == 2 && IsRegTok(ops[0])) {
+            MemOp m = ParseMem(ops[1]);
+            std::string dc = CanonReg(ops[0]);
+            if (m.base == "rbp" && m.index.empty()) {
+                // &yerel / &arguman
+                f.SetReg(dc, "&" + f.FrameRef(m.disp, false));
+            } else {
+                std::string b = f.Reg(m.base);
+                if (b.empty()) b = m.base;
+                std::string e = "&" + b;
+                if (m.disp > 0) e += " + 0x" + ToHex((u64)m.disp);
+                else if (m.disp < 0) e += " - 0x" + ToHex((u64)(-m.disp));
+                f.SetReg(dc, e);
+            }
+            continue;
+        }
+        if ((mn == "add" || mn == "sub" || mn == "xor" || mn == "and" ||
+             mn == "or" || mn == "shl" || mn == "shr" || mn == "imul") &&
+            ops.size() == 2 && IsRegTok(ops[0])) {
+            std::string dc = CanonReg(ops[0]);
+            std::string cur = f.UseVal(dc);
+            if (cur.empty()) cur = dc;
+            // xor r,r → 0
+            if (mn == "xor" && IsRegTok(ops[1]) && CanonReg(ops[1]) == dc) {
+                f.SetReg(dc, "0");
+                if (dc == "rax") eaxWritten = true;
+                continue;
+            }
+            auto foldRhs = [&](const std::string& o) -> std::string {
+                if (IsRegTok(o)) {
+                    std::string e = f.Reg(CanonReg(o));
+                    return e.empty() ? o : e;
+                }
+                if (o.find('[') != std::string::npos)
+                    return f.MemExpr(ParseMem(o), x);
+                return o;
+            };
+            std::string rhs = foldRhs(ops[1]);
+            const char* op = mn == "add" ? " + " : mn == "sub" ? " - " :
+                             mn == "xor" ? " ^ " : mn == "and" ? " & " :
+                             mn == "or" ? " | " : mn == "shl" ? " << " :
+                             mn == "shr" ? " >> " : " * ";
+            f.SetReg(dc, "(" + cur + op + rhs + ")");
+            continue;
+        }
+        if ((mn == "cmp" || mn == "test") && ops.size() == 2) {
+            auto foldOp = [&](const std::string& o) -> std::string {
+                if (IsRegTok(o)) {
+                    std::string e = f.UseVal(CanonReg(o));
+                    return e.empty() ? o : e;
+                }
+                if (o.find('[') != std::string::npos)
+                    return f.MemExpr(ParseMem(o), x);
+                return o;
+            };
+            cmpL = foldOp(ops[0]);
+            cmpR = foldOp(ops[1]);
+            cmpIsTest = (mn == "test");
+            continue;
+        }
+        if (x.isJcc && ops.size() >= 1) {
+            // jcc anında koşulu kur: test → (a & b) !=/== 0; cmp → a OP b
+            std::string neg = mn.substr(1);   // e/ne/z/nz/s/ns/g/...
+            std::string ce;
+            if (cmpIsTest) {
+                std::string op = (neg == "e" || neg == "z") ? "==" : "!=";
+                if (neg == "e" || neg == "z" || neg == "ne" || neg == "nz") {
+                    // test a,a: ifadeyi TEK kez göster (çağrı katlaması uzun olur)
+                    bool plainIdent = !cmpL.empty() &&
+                        cmpL.find_first_not_of(
+                            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                            "0123456789_") == std::string::npos;
+                    std::string lhs = plainIdent ? cmpL : "(" + cmpL + ")";
+                    if (cmpL == cmpR) ce = lhs + " " + op + " 0";
+                    else ce = "(" + cmpL + " & " + cmpR + ") " + op + " 0";
+                } else ce = cmpL + " & " + cmpR;
+            } else {
+                std::string op;
+                if (neg == "e" || neg == "z") op = "==";
+                else if (neg == "ne" || neg == "nz") op = "!=";
+                else if (neg == "s") op = "< 0";
+                else if (neg == "ns") op = ">= 0";
+                else if (neg == "g" || neg == "nle") op = ">";
+                else if (neg == "ge" || neg == "nl") op = ">=";
+                else if (neg == "l" || neg == "nge") op = "<";
+                else if (neg == "le" || neg == "ng") op = "<=";
+                else if (neg == "b" || neg == "nae") op = "< (u)";
+                else if (neg == "be" || neg == "na") op = "<= (u)";
+                else if (neg == "a" || neg == "nbe") op = "> (u)";
+                else if (neg == "ae" || neg == "nb") op = ">= (u)";
+                ce = cmpL + " " + op + " " + cmpR;
+                if (op.empty()) ce = cmpL + " ? " + cmpR;
+            }
+            char b[96];
+            snprintf(b, sizeof b, "loc_%llx", (unsigned long long)x.target);
+            body.push_back("    if (" + ce + ") goto " + b + ";");
+            cmpL.clear(); cmpR.clear();
+            continue;
+        }
+        if (x.isJmp) {
+            // kuyruk çağrısı (tail-call) veya dallanma
+            if (!x.isIndirect) {
+                char b[96];
+                snprintf(b, sizeof b, "loc_%llx", (unsigned long long)x.target);
+                const FuncInfo* tf = az_.FunctionStart(x.target);
+                if (tf && tf->start != start)
+                    body.push_back("    return " + callRender(xi) + ";   // kuyruk cagri");
+                else
+                    body.push_back(std::string("    goto ") + b + ";");
+            } else {
+                body.push_back("    goto *(dolayli);   // " + x.opStr);
+            }
+            continue;
+        }
+        if (mn == "ret") {
+            std::string e = f.Reg("rax");
+            std::string rn;
+            if (!e.empty() && e == f.Pending()) f.ConsumePending();
+            size_t np = e.find("   //");
+            if (np != std::string::npos) { rn = e.substr(np); e = e.substr(0, np); }
+            body.push_back(std::string("    return ") +
+                           (e.empty() ? "eax" : e) + ";" + rn);
+            // ERKEN ÇIKIŞ: pencereyi durdurma — devam eden gövde de render
+            // edilir (birden çok return tek fonksiyonda normal MSVC deseni)
+            pushArgs.clear();
+            continue;
+        }
+        if (mn == "leave" || mn == "nop" || mn == "int3") continue;
+        // bilinmeyen: yorum satırı olarak koru (dürüstlük)
+        if (mn != "endbr32" && mn != "cdq" && mn != "movsx" && mn != "movzx" &&
+            mn != "setne" && mn != "sete" && mn != "movsxd")
+            body.push_back("    // " + mn + " " + x.opStr);
+        if (IsRegTok(ops.empty() ? "" : ops[0]))
+            f.SetReg(CanonReg(ops[0]), "");
+    }
+
+    // döngü bitti: hâlâ okunmamış çağrı varsa düz ifade olarak ver
+    if (!f.Pending().empty()) {
+        std::string pc = f.Pending(), pn;
+        size_t np = pc.find("   //");
+        if (np != std::string::npos) { pn = pc.substr(np); pc = pc.substr(0, np); }
+        body.push_back("    " + pc + ";" + pn);
+        f.ConsumePending();
+    }
+
+    // ---- ÇAĞRI TEK-SEFER GEÇİŞİ (64-bit yoldan devralınan "yutuldu"
+    // mekanizması): bağımsız çağrı satırı, aynı ifadenin geçtiği daha uzun
+    // bir satır (return / if koşulu / atama) varsa yutulur — çağrı dosyası
+    // her noktada TEK kez gösterilir (Hex-Rays semantiği) ----
+    {
+        auto isCallStmt = [](const std::string& t) {
+            if (t.size() < 5 || t.substr(t.size() - 2) != ");") return false;
+            if (t.find("loc_") == 0) return false;
+            static const char* kw[] = {"return", "if ", "while", "do ",
+                                       "else", "goto", "//"};
+            for (auto* k : kw) if (t.rfind(k, 0) == 0) return false;
+            return t.find('(') != std::string::npos;
+        };
+        std::set<size_t> eaten;
+        for (size_t i = 0; i < body.size(); i++) {
+            if (!isCallStmt(body[i])) continue;
+            std::string bt = body[i];
+            size_t nc = bt.find("   //");
+            if (nc != std::string::npos) bt = bt.substr(0, nc);
+            std::string core = bt.substr(0, bt.size() - 1);   // ';' kır
+            if (core.size() < 3) continue;
+            for (size_t j = 0; j < body.size(); j++) {
+                if (j == i || eaten.count(j)) continue;
+                if (body[j].find(core) != std::string::npos &&
+                    body[j].size() > body[i].size()) {
+                    eaten.insert(i);
+                    break;
+                }
+            }
+        }
+        std::vector<std::string> kept;
+        kept.reserve(body.size());
+        for (size_t i = 0; i < body.size(); i++)
+            if (!eaten.count(i)) kept.push_back(body[i]);
+        body.swap(kept);
+    }
+
+    // ---- imza ----
+    std::string fname = az_.NameFor(start);
+    std::string sigLine;
+    if (pfn && !pfn->proto.empty()) {
+        sigLine = pfn->proto;
+    } else {
+        // PDB parametre adlarıyla imza kur
+        if (pfn) {
+            fname = pfn->shortName.empty() ? pfn->name : pfn->shortName;
+            if (!fname.empty() && fname[0] == '?') fname = pfn->shortName;
+        }
+        std::string argList;
+        for (size_t i = 0; i < f.args_.size(); i++) {
+            if (i) argList += ", ";
+            argList += "int " + f.args_[i];
+        }
+        sigLine = "int " + fname + "(" + (argList.empty() ? "void" : argList) + ")";
+    }
+
+    std::string out;
+    out += "// ============================================================\n";
+    out += "// " + fname + "  (" + std::to_string(ins.size()) + " komut, x86-32)\n";
+    out += "// kapsam: 0x" + ToHex(start) + " - 0x" +
+           ToHex(ins.back().addr + ins.back().len) + "\n";
+    out += "// ============================================================\n";
+    out += sigLine + "\n{\n";
+    // yerel tanımlar
+    for (auto& [d, lv] : f.locals_) {
+        (void)d;
+        out += "    int " + lv.name + ";\n";
+    }
+    for (auto& t : f.temps_) out += "    int " + t + ";\n";
+    out += "\n";
+    for (auto& s : body) out += s + "\n";
+    // v8.1: vfN SÖZLÜĞÜ footer — PDB'siz adlandırılan sanal çağrıların
+    // kanıt koordinatları (vfN = vtable slot N; x86-32 bayt ofseti = 4*N).
+    // "vf4 ne?" sorusunun çıktıdaki kalıcı cevabı:
+    //   vf4  = CPythonPlayer vftable[0x805054] + 0x10 -> 0x4e2f60
+    if (!vfGloss.empty()) {
+        out += "\n    // --- vfN sozlugu (PDB'siz adlandirma — kanit adresleri) ---\n";
+        for (auto& [slot, line] : vfGloss)
+            out += "    // " + line + "\n";
+    }
+    out += "}\n";
+    return out;
 }
 
 } // namespace gt

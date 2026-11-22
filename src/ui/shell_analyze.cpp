@@ -336,4 +336,100 @@ void Shell::CmdTrace(const std::vector<std::string>& a) {
         Log("  0x%012llx  %s\n", (unsigned long long)t[i].addr, t[i].text.c_str());
 }
 
+
+// ----------------------------------------------------------------------------
+// v7: RTTI atlası — MSVC sınıf evreni (sembolsiz binary'lerden!)
+// ----------------------------------------------------------------------------
+void Shell::CmdRtti(const std::vector<std::string>& a) {
+    if (!RequireBinary() || !RequireMapped()) return;
+    EnsureAnalyzed();
+    MsvcRtti& rtti = ps_->Rtti();
+    auto& classes = rtti.Classes();
+    if (classes.empty()) {
+        LogLine(LogColor::Yellow,
+                "RTTI bulunamadi (MSVC degil / RTTI kirpilmis / ELF — Itanium yolu vtable komutundadir)");
+        return;
+    }
+    LogLine(LogColor::Cyan,
+            "== RTTI ATLASI: %zu sinif, %zu vftable slotu =====================",
+            classes.size(), rtti.SlotCount());
+    // rtti <ad>: tek sınıfın slot detayı
+    if (!a.empty()) {
+        std::string want = a[0];
+        for (auto& c : classes) {
+            if (c.name != want && c.rawName != want) continue;
+            LogLine(LogColor::Green, "  %s  (%s)", c.name.c_str(), c.rawName.c_str());
+            Log("    TypeDescriptor @ 0x%llx, COL @ 0x%llx\n",
+                (unsigned long long)c.tdVa, (unsigned long long)c.colVa);
+            Log("    vftable @ 0x%llx (nesne ofseti +%u), %zu slot\n",
+                (unsigned long long)c.vftVa, c.objectOffset, c.slots.size());
+            for (size_t i = 0; i < c.slots.size() && i < 48; i++) {
+                Log("      [+0x%03zx] 0x%llx  %s\n", i * (bin_->Is64() ? 8 : 4),
+                    (unsigned long long)c.slots[i],
+                    az_->NameFor(c.slots[i]).c_str());
+            }
+            if (c.slots.size() > 48) Log("      ... (%zu slot daha)\n", c.slots.size() - 48);
+            return;
+        }
+        LogErr("Sinif bulunamadi: %s", want.c_str());
+        return;
+    }
+    size_t shown = 0;
+    for (auto& c : classes) {
+        if (!a.empty() && c.name != a[0]) continue;
+        Log("  %-44s vft=0x%08llx  %3zu slot  (nesne+%u)\n",
+            c.name.c_str(), (unsigned long long)c.vftVa, c.slots.size(),
+            c.objectOffset);
+        if (++shown >= 60) { Log("  ... (%zu sinif daha)\n", classes.size() - shown); break; }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// v7: DEVRİT-PRO — dolaylı çağrıların tam statik çözümü
+// ----------------------------------------------------------------------------
+void Shell::CmdDevirt(const std::vector<std::string>& a) {
+    if (!RequireBinary() || !RequireMapped()) return;
+    EnsureAnalyzed();
+    DevirtPro& dp = ps_->Devirt();
+    // devirt stats: v8.1 mekanizma kırılımı — çözülenler NASIL, kalanlar NEDEN
+    if (!a.empty() && a[0] == "stats") {
+        std::string rep;
+        dp.DumpStats(rep);
+        Log("%s", rep.c_str());
+        return;
+    }
+    // devirt <adres>: tek çağrının kanıt zinciriyle çözümü
+    if (!a.empty()) {
+        u64 va = ParseAddr(a[0]);
+        DevirtPro::Result r = dp.Resolve(va);
+        LogLine(LogColor::Cyan,
+                "== DEVRIT-PRO: 0x%llx ===========================", (unsigned long long)va);
+        if (r.trace.empty() && !r.resolved) {
+            LogLine(LogColor::Yellow, "  kanit zinciri kurulamadi (dolayli cagri degil / pencere yetersiz)");
+        }
+        for (auto& t : r.trace) Log("  %s\n", t.c_str());
+        if (r.resolved) {
+            LogLine(LogColor::Green, "  >> COZUM: %s (0x%llx)",
+                    r.name.c_str(), (unsigned long long)r.target);
+            if (!r.className.empty())
+                Log("     sinif: %s, slot %d, vftable 0x%llx\n",
+                    r.className.c_str(), r.slot, (unsigned long long)r.vftVa);
+            Log("     kanit: %s\n", r.why.c_str());
+        } else if (!r.candidates.empty()) {
+            LogLine(LogColor::Yellow, "  >> DURUSTCE SANAL KALDI — adaylar:");
+            for (auto& n : r.candidateNames) Log("     - %s\n", n.c_str());
+        } else {
+            LogLine(LogColor::Yellow, "  >> cozulemedi (sanal cagri olarak kaldi)");
+        }
+        return;
+    }
+    // devirt (bos): tüm çözülenler + statik envanter
+    std::string rep;
+    dp.DumpStatics(rep);
+    dp.DumpResolved(rep);
+    Log("%s", rep.c_str());
+    LogOk("devirt-pro: %zu statik nesne, %zu cagri statik cozuldu",
+          dp.StaticCount(), dp.ResolvedCount());
+}
+
 } // namespace gt

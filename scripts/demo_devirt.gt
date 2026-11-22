@@ -1,0 +1,41 @@
+# i4M GodTier v7 — DEVRİT-PRO canlı kanıt oturumu (metin2client.exe)
+# Gerçek ticari oyun istemcisi: 5.2 MB PE32 (MSVC), PDB'li.
+# Yol: binary + pdb'yi bir dizine koy, aşağıdaki iki load/pdb satırını
+# o dizine göre düzenle, sonra:  godtier -s scripts/demo_devirt.gt
+#
+# SORU (gerçek kullanıcı vakası):
+#   "CPythonPlayer::Instance().GetStatus(iType)" derlemde şuna dönüşuyor:
+#       mov ecx, [ms_singleton]     ; .bss (imajda 0 — kurucu yazar)
+#       add ecx, 4
+#       mov eax, [ecx]              ; vptr (runtime'da belli)
+#       mov eax, [eax+0x10]         ; vtable slot 4
+#       call eax                    ; <- KİM?
+#       ...
+#       call dword ptr [edx+0x88]   ; <- KİM? (edx = vptr)
+#   Process'i açmadan bunu %100 çözebilir miyiz?
+#
+# CEVAP: EVET — ama emülasyonla DEĞİL, kanıtla. (livestep-lite)
+
+load /home/z/my-project/research/metin2/metin2client.exe
+pdb  /home/z/my-project/research/metin2/metin2client.pdb
+
+# 1) Hedef fonksiyonu PDB ismiyle bul
+funcs playerGetStatus
+
+# 2) Sembolsüz bile çalışır: MSVC RTTI atlası (TypeDescriptor/COL/vftable)
+#    → 892 sınıf, 7282 vftable slotu geri kazanılır
+rtti
+
+# 3) Kullanıcının sorduğu ÇAĞRININ KANIT ZİNCİRİ (call [edx+0x88]):
+#    → CPythonPlayer::NEW_GetMainActorPtr, slot 34, vftable 0x805054,
+#      kurucu vtable-saklama kanıtı
+devirt 0x4eadbe
+
+# 4) TAM RESİM: playerGetStatus pseudocode — devirt edilmiş statik çağrılarla
+#    (kaynak kodla 1:1: GetStatus + NEW_GetMainActorPtr + GetWeaponType +
+#     Py_BuildValue("i", v - TWOHANDED_...))
+decomp 0x4ead70
+
+# 5) Tüm binary'de devirt-pro envanteri: 111 statik nesne yazıcısı,
+#    3842/7420 dolaylı çağrı statik çözülmüş
+devirt

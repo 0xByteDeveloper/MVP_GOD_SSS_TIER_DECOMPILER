@@ -10,7 +10,9 @@
 //  Köprüler: RetDec/Ghidra headless (bridge).
 // ============================================================================
 #pragma once
+#include "analysis/msvcrtti.h"
 #include "decomp/cfg.h"
+#include "decomp/devirtpro.h"
 #include "decomp/types.h"
 #include "format/pdb.h"
 #include "disasm/analyzer.h"
@@ -38,12 +40,18 @@ public:
 
     // Global tip veritabanı (ilk kullanımda otomatik koşar)
     TypeInferer& TI();
-    void InvalidateTI() { ti_.reset(); }   // PDB yüklenince yeniden kurulsun
+    void InvalidateTI() { ti_.reset(); devirtPro_.reset(); rtti_.reset(); }
     // PDB kanalı: InvalidateTI sonrası bile hayatta kalır (pending olarak taşınır)
     void SetPdb(std::unique_ptr<PdbInfo> p) {
         if (ti_) ti_->SetPdb(std::move(p));
         else pendingPdb_ = std::move(p);
+        devirtPro_.reset();   // isimler değişti — kanıt taraması yenilensin
     }
+
+    // v7: MSVC RTTI atlası (lazy — ilk kullanımda tarar)
+    MsvcRtti& Rtti();
+    // v7: DEVRİT-PRO motoru (lazy — Rtti + TI hazır olduktan sonra Build)
+    DevirtPro& Devirt();
 
     // Harici decompiler köprüleri
     static std::string BridgeRetDec(const std::string& pePath, const std::string& outPath);
@@ -54,6 +62,9 @@ private:
     DecompOptions opt_;
     std::unique_ptr<TypeInferer> ti_;
     std::unique_ptr<PdbInfo> pendingPdb_;   // TI kurulana dek bekleyen PDB
+    std::unique_ptr<MsvcRtti> rtti_;
+    std::unique_ptr<DevirtPro> devirtPro_;
+    std::string Decompile32(u64 start);     // v7: PE32 (x86) pseudocode yolu
 };
 
 } // namespace gt

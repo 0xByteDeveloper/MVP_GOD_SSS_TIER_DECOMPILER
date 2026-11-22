@@ -368,6 +368,9 @@ void Shell::CmdHelp(const std::vector<std::string>&) {
     Log("  proc list|attach|modules|read|write|detach   (Win: RPM, Linux: /proc)\n");
     LogLine(LogColor::White, " HARICI KO PRULER");
     Log("  bridge retdec|ghidra    harici decompiler cagrisi\n");
+    Log("  rtti [sinif]            v7: MSVC RTTI atlasi (siniflar + vftable)\n");
+    Log("  devirt [cagri-adresi]   v7: sanal cagriyi statik coz (kanit zinciri)\n");
+    Log("  devirt stats            v8.1: mekanizma kirilimi (nasil cozuldu/neden cozulemedi)\n");
     LogLine(LogColor::White, " DIGER");
     Log("  script <dosya.gt>       toplu komut (v6: $degisken/set/eval/if)  menu  klasik i4M menusu\n");
     Log("  help                    bu ekran              quit / q   cikis\n");
@@ -429,6 +432,8 @@ bool Shell::ExecuteCommand(const std::string& line) {
     else if (cmd == "dump") CmdDump(rest);
     else if (cmd == "save") CmdSave(rest);
     else if (cmd == "pdb") CmdPdb(rest);
+    else if (cmd == "rtti") CmdRtti(rest);
+    else if (cmd == "devirt") CmdDevirt(rest);
     else if (cmd == "deep") CmdDeep(rest);
     else if (cmd == "sig") CmdSig(rest);
     else if (cmd == "lumina") CmdLumina(rest);

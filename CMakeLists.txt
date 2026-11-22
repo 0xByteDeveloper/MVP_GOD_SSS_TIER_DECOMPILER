@@ -98,11 +98,14 @@ add_library(godtier_core STATIC
     src/emulate/apishim.cpp
     src/decomp/cfg.cpp
     src/decomp/pseudocode.cpp
+    src/decomp/devirtpro.cpp
+    src/decomp/devirtemu.cpp
     src/decomp/types.cpp
     src/analysis/features.cpp
     src/analysis/deepscan.cpp
     src/analysis/sigs.cpp
     src/analysis/obfus.cpp
+    src/analysis/msvcrtti.cpp
     src/proc/process.cpp
     src/ui/shell.cpp
     src/ui/shell_analyze.cpp

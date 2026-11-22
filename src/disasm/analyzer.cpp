@@ -195,6 +195,10 @@ std::vector<Ins> Analyzer::DisassembleFunction(u64 start, size_t maxIns) {
 
     // fonksiyon kaydını güncelle
     auto& f = funcs_[start];
+    f.start = start;   // v8 DÜZELTME: start atanmamıştı — FunctionAt kapsama
+                       // kontrolü ve InstructionsOf(f.start) bu alanda bozuluyordu
+    if (f.name.empty())
+        f.name = "sub_" + ToHex(start, 8);
     if (!out.empty()) {
         f.end = out.back().addr + out.back().len;
         f.insCount = out.size();

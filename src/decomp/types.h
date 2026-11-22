@@ -135,8 +135,24 @@ public:
         u64 target = 0;           // çözülen hedef VA (0 = çözülemedi)
         std::string methodName;   // "Kopek::oyun" üslubu kısa ad
         std::string why;          // kanıt açıklaması (ek açıklama için)
+        // v8.1: vfN SÖZLÜĞÜ — PDB'siz "vf4" adlandırmasının NE olduğunu
+        // çıktıda göstermek için kanıt koordinatları (vfN = vtable slotu):
+        //   vf4 = <className> vftable[<vftVa>] + slot*ptrSize -> <target>
+        u64 vftVa = 0;            // kanıt vftable'ı (0 = vtable'sız çözüm)
+        int slot = -1;            // vtable slot indeksi
+        std::string className;    // RTTI sınıf adı
+        std::string proofKind;    // "kurucu" / "atlas" / "tier-3" / "IAT" / "pencere"
     };
     DevirtResult TryDevirtualize(u64 callAddr) const;
+
+    // v7: DEVRİT-PRO kanıtları (PE32 RTTI + singleton zincirleri).
+    // Pseudocoder'ın dolaylı çağrı render'ı önce buraya bakar.
+    void RegisterDevirtFact(u64 callAddr, u64 target, const std::string& name,
+                            const std::string& why, u64 vftVa = 0, int slot = -1,
+                            const std::string& className = "",
+                            const std::string& proofKind = "");
+    const DevirtResult* DevirtFactAt(u64 callAddr) const;
+    bool HasDevirtFacts() const { return !devirtFacts_.empty(); }
 
 private:
     // --- Faz A: gövde taraması ---
@@ -208,6 +224,7 @@ private:
     std::unique_ptr<PdbInfo> pdb_;
     std::vector<VTable> vtables_;
     std::map<u64, VirtCall> virtCalls_;     // call adresi -> sanal çağrı
+    std::map<u64, DevirtResult> devirtFacts_;  // v7: devirt-pro kanıtları
 };
 
 } // namespace gt

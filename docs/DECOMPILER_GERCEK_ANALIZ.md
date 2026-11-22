@@ -401,7 +401,7 @@ v5 ile dört büyük hedefin DÖRDÜ de tamamlandı (2025-11 itibarıyla):
 |---|---|---|
 | **Tam phi-SSA** | ✅ Döngü-taşıyıcı phi'ler (birikimli `v1 += ...` kurtarma), cmov donanım-phi katlaması, çok-öncül birleşimde uzlaşan-register mirası, koşullu dönüş ternary'si | `simd_dot` O3: `float v2 = 0; // phi: xmm0` + `v2 += 4 lane çarpımı`; `phi_ucyol` O3: `( x >= 0x33 ) ? ...` |
 | **SIMD skaler geri açma** | ✅ Lane-modeli: movups/movdqu yüklemeleri 4 lane'li ifade; mulps/addps lane-wise; addss+shufps/unpckhps/movshdup yatay indirme zinciri skaler ifadeye açılır; paddd/psrldq int lane'i | `simd_dot` O3 vektör döngüsü TAMAMEN skaler; `ortalama_hesapla` O2 8-eleman paddd ağacı TAMAMEN skaler — `simd_add`/`simd128` kalmadı |
-| **Devirtualizasyon** | ✅ Üç strateji: (1) kurucu vtable-saklama kanıtı (stripped dostu), (2) DWARF CHA — statik tip + tüm alt sınıflar üzerinden slot implantları tek ise KESİN çözüm, (3) slot-tek-impl spekülatif. Çok impl'li slot DÜRÜSTÇE sanal kalır | `devirt_tek` → `Tek::deger(t)` (CHA kanıt notuyla); `sanal_kalir` → `h->ses()` (Kopek override tespit edildi, yanlış devirt YOK) |
+| **Devirtualizasyon** | ✅✅ v7 DEVRİT-PRO (4 strateji): (1) kurucu vtable-saklama kanıtı, (2) DWARF CHA, (3) slot-tek-impl spekülatif, (4) **PE32 MSVC RTTI atlası + global-singleton zincir değerlendiricisi (livestep-lite)** — sembolsiz PE32'de vftable/COL/TypeDescriptor taramasıyla sınıf evreni + pencere değerlendiricisiyle `call [edx+0x88]` üslubu dolaylı çağrılar statik çözülür; çok impl DÜRÜSTÇE aday listesiyle sanal kalır. **Gerçek binary kanıtı: metin2client.exe (5.2 MB, PDB'li) — 892 sınıf/7282 vftable slotu geri kazanıldı, 3842/7420 dolaylı çağrı statik çözüldü** | `playerGetStatus` → `CPythonPlayer::GetStatus` (slot 4) + `CPythonPlayer::NEW_GetMainActorPtr` (slot 34) — kaynak kodla 1:1 |
 | **Süper blok birleştirme** | ✅ CFG düzeyi: trambolin (tek komutlu jmp) kenar yönlendirme + adres-komşu tek-öncül füzyon; gösterim düzeyi: tek-öncül zincir soğurması | `erken_donus` 8 blok → goto YOK, erken dönüş zinciri + ternary return |
 
 Kalan dürüst kısımlar (v6 hedefleri):
@@ -1283,7 +1283,7 @@ IDA/Ghidra çalıştırılmadı, çıktı uydurulmadı.)*
 | Yapılaştırma (if/else/while) | v4: while/do-while/for/break/continue/&&-\|\|/ternary + goto geri dönüşü; v5: erken dönüş zinciri + koşullu dönüş ternary'si | tam | tam + daha az goto |
 | phi-SSA | v5: döngü-taşıyıcı phi (`v2 += ...` kurtarma) + cmov donanım-phi katlaması + uzlaşan-register mirası + koşullu dönüş ternary'si | tam SSA (dominator tree) | tam SSA |
 | SIMD vektör geri açma | **v5: lane modeli** — movups/mulps/addps/paddd + yatay indirme zinciri TAMAMEN skaler ifadeye açılır | çoğunlukla ham kalır | çoğunlukla ham kalır |
-| Devirtualizasyon | **v5: 3 strateji** — (1) kurucu vtable-saklama kanıtı, (2) DWARF CHA (tek-impl slot KESİN çözüm), (3) slot-tek-impl spekülatif; çok-impl dürüstçe sanal kalır | yok (betikle kısmen) | yok (Simplify trace ile elle) |
+| Devirtualizasyon | **v7: 4 strateji** — (1) kurucu vtable kanıtı, (2) DWARF CHA, (3) slot-tek-impl, (4) **PE32 RTTI atlası + singleton zincir değerlendiricisi** (gerçek metin2client.exe: 3842/7420 dolaylı çağrı statik çözüldü, IDA'da da Ghidra'da da otomatik karşılığı YOK) | yok (betikle kısmen) | yok (Simplify trace ile elle) |
 | Değişken isim/tip çıkarımı | imza+tip+yerel-değişken + v6: **authoritative DWARF struct giydirme** (o->notlar[2] üslubu; belirsizse giydirmez) + **lumina push/pull birikimli isim havuzu** | otomatik | otomatik + Lumina (bulut) |
 | Struct geri kazanımı | otomatik (union-find) | yarı otomatik | güçlü (elle hızlandırılır) |
 | Derleyici idiom katlama | magic-div + % + opak öncül katlama + ölü kod budama | var (opak öncül katlaması yok) | var |
@@ -1291,20 +1291,79 @@ IDA/Ghidra çalıştırılmadı, çıktı uydurulmadı.)*
 | DWARF/PDB | v3: DWARF 4/5 + PDB (MSF7/TPI) | DWARF var (PDB: Universal) | ikisi de var |
 | Obfuscation analizi | v4: entropi + packer imzaları + anti-analiz + opaque predicate taraması → risk raporu; katlamayla ölü kod budama | çoğunlukla takılır (yerleşik tarama yok) | çoğunlukla takılır (+SDK ile elle) |
 | Arama | v4: `find hex/imm/str/asm` | GUI arama | GUI + SDK |
-| Mimari kapsamı | v6: x86-64/x86-32 decompiler + **ARM64/ARM32 analiz hattı** (keşif/xref/string) | onlarca mimari + hepsinde decompiler | onlarca mimari + hepsinde decompiler |
+| Mimari kapsamı | v6: x86-64 decompiler + ARM64/ARM32 analiz hattı; **v7: x86-32 (PE32) decompiler YOLU AÇILDI** — cdecl/thiscall/stdcall argüman kurtarma + ertelenmiş çağrı malzemeleşmesi (vN = çağrı; tek sefer basım) + devirt- entegrasyonu | onlarca mimari + hepsinde decompiler | onlarca mimari + hepsinde decompiler |
 | GUI | ImGui (dock) | Swing | Qt (en olgun) |
 | Komut satırı/otomasyon | v6: `godtier -s script.gt` + **$değişken/aritmetik/if koşullu script dili** (bağımlılıksız) | analyzeHeadless + Python (ghidra-script) | idat + idapython (en olgun betik API) |
 | Fiyat | açık kaynak | açık kaynak | ~$$$/yıl |
 
 Not (dürüstlük): Hex-Rays hâlâ genel olgunluk/DB genişliği/çoklu mimaride
 öndedir; üstünlük iddiamız somut satırlardadır: **SIMD skaler geri açma**
-(her ikisi de ham bırakır), **CHA devirtualizasyonu** (her ikisinde de
-otomatik yok), **tek komutla imza üretimi**, **opak öncül katlaması**,
+(her ikisi de ham bırakır), **otomatik devirtualizasyon** (her ikisinde de otomatik yok — v7'de 4 strateji + gerçek
+binary'de 3842 dolaylı çağrı statik çözüm kanıtı), **tek komutla imza üretimi**, **opak öncül katlaması**,
 **kanıt zincirli derin keşif**, **goto'suz iç içe yapılaştırma**, **yerleşik
 obfuscation risk raporu** ve fiyat. Kendi zayıf satırlarımız da dürüstçe
 tabloda duruyor (mimari kapsamı, Lumina benzeri isim havuzu, GUI olgunluğu).
 
 ---
+
+## 7-B. CANLI KANIT: metin2client.exe (v7 DEVRİT-PRO)
+
+**Hedef:** gerçek bir ticari oyun istemcisi (Metin2, 5.2 MB PE32, MSVC, PDB'li).
+**Soru (kullanıcıdan):** `CPythonPlayer::Instance().GetStatus(iType)` derlemde
+`call eax` / `call dword ptr [edx+88h]` oluyor — "edx'i process'i açmadan %
+100 simüle edip öğrenebilir miyiz? livestep.cpp (canlı analiz motoru) işi çözer mi?"
+
+**Cevap (düşünce + uygulama + kanıt):**
+
+1. **Process-geniş simülasyon YANLIŞ ARAÇ:** `playerGetStatus` oyuncu login
+   olana dek çağrılmaz (Python'dan veri güdümlü). Hiçbir emülatör "oyuncunun
+   giriş yapmasını" simüle edemez; D3D döngüsü milyonlarca komuttur. Üstelik
+   livestep.cpp v4 amprik testte 6. adımda desync (jcc çözülmez, `mov reg,[mem]`
+   çalıştırılmaz) — 78 adımda çöktü. **Doğru araç: livestep-LITE pencere
+   değerlendiricisi** — çağrıya kadarki ~10 komutu somut-simgesel değerlendir,
+   eksik halka "bu statik nesnenin vtable'ı ne?" ise cevabı KURUCUDA ara.
+
+2. **Kanıt zinciri (tamamı STATİK — binary hiç çalışmadı):**
+   - `mov ecx, [0x8BD2D0]` → .bss'te ms_singleton (imajda 0!)
+   - RTTI atlası: 892 sınıf, 7282 vftable slotu (TypeDescriptor/COL taraması)
+   - CPythonPlayer kurucusu: `[this+4] = vftable 0x805054` + `ms_singleton = this`
+     → son-yazım-kazanır kanıtı (ara yazımlar dürüstçe ezilir)
+   - `call eax` (vptr+0x10) → **CPythonPlayer::GetStatus, slot 4** [ÇÖZÜLDÜ]
+   - `call [edx+0x88]` → **CPythonPlayer::NEW_GetMainActorPtr, slot 34** [ÇÖZÜLDÜ]
+
+3. **Sonuç — decompiler çıktısı vs Orijinal kaynak kodu (1:1):**
+
+```c
+// godtier: decomp 0x4ead70  (PDB isimleri + devirt-pro ile)
+_object * playerGetStatus(_object * poSelf, _object * poArgs)
+{
+    v2 = PyTuple_GetInteger(poArgs, 0, &iType);
+    if (v2 != 0) goto loc_4ead97;
+    return Py_BuildException(0);
+    v3 = CPythonPlayer::GetStatus((*(CSingleton<CPythonPlayer>::ms_singleton) + 4), iType);
+    if (iType != 0x11) goto loc_4eadda;                    // POINT_ATT_SPEED = 17
+    v4 = CPythonPlayer::NEW_GetMainActorPtr(...);           // <-- call [edx+0x88] DEVRİRT
+    if (v4 == 0) goto loc_4eadda;
+    v5 = CInstanceBase::GetWeaponType(v4);
+    if (v5 != 3) goto loc_4eadda;                          // WEAPON_TWO_HANDED = 3
+    return python27.dll.Py_BuildValue("i", (v3 - *(TWOHANDED_WEWAPON_ATT_SPEED_DECREASE_VALUE)));
+}
+```
+
+Kaynak koddaki her satır (arg adları, 0x11 sabiti, "== 3" karşılaştırması,
+TWOHANDED global adı, `"i"` format stringi) geri kazanıldı.
+
+4. **Geniş ölçüm:** 25.673 fonksiyon, 111 statik nesne yazıcısı (50'si vtable
+   kanıtlı), **3842/7420 dolaylı çağrı statik çözüldü** (geri kalanlar IAT
+   dışı dürüst-sanal). IDA'da da Ghidra'da da bunu otomatik yapan yok.
+
+5. **livestep.cpp hükmü:** v4 = uzunluk-çözümleyici + iz dökümü (yürütme
+   modeli push/pop/mov-reg-imm/call-rel only). Devirt için gerekmedi —
+   fikirleri (seyrek bellek, TEB, iz biçimi) devirt-pro'ya "livestep-lite"
+   olarak devralındı ve kanıtlandı. Tam-emülasyon gerektiğinde (VMProtect
+   üslubu runtime-vtable, packer) repo'daki **Unicorn emülatörü** (gerçek
+   x86-32/64 yürütme + API shim + TEB/PEB) livestep'in mini-yorumlayıcısından
+   çok daha güçlüdür — Tier-3 entegrasyonu oradan yapılacaktır.
 
 ## 8. Hex-Rays ve Ghidra'nın da BAŞARISIZ OLDUĞU şeyler
 

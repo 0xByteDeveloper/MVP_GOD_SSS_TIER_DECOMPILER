@@ -98,6 +98,39 @@ yeniden üretme script'i: `scripts/decomp_demo/decomp_demo.gt`
 
 Iki fazli global analiz — IDA/Ghidra modeli.
 
+- **v8.1 vfN SÖZLÜĞÜ + MEKANİZMA KIRILIMI (metin2client.exe'de ÖLÇÜLMÜŞ):**
+  PDB'siz çıktıda `vf4`/`vf34` adlarının NE olduğu artık kanıt koordinatlarıyla yazılıyor —
+  çağrının yanında ve fonksiyon-sonu sözlüğünde: `// vf4 = CPythonPlayer
+  vftable[0x805054] + 0x10 -> 0x4e2f60` (vfN = vtable slot N; x86-32 ofseti 4×N).
+  Yeni `devirt stats` komutu "4444/9160 çözüldü" sayısının İÇ YAPISINI döker:
+  kurucu-kanıt 245, atlas inversiyonu 236, tier-3 unicorn 256, IAT import 3222,
+  vtable'sız somut 485; kalan 4716 = 4117 tier-3-pencere (tohum yok) + 471
+  kanıt-yok (heap/param alıcı) + 128 dürüst çoklu-aday. Çözülemeyenlerin
+  tamamı neden-etiketli; tekil spekülatif tahmin sıfır. Test: 319/319.
+- **v8 DEVRİT TIER-3 + İNVERSİYON + INSTANCE() (metin2client.exe'de KANITLI —
+  `docs/DEVRIT_V8_CANLI_KANIT.md`):**
+  **TIER-3 Unicorn tohumlu pencere emülasyonu** (`src/decomp/devirtemu.cpp` —
+  livestep.cpp vizyonunun doğru ölçekte gerçekleştirilmesi: dolaylı çağrının
+  temel bloğu GERÇEK x86 semantiğiyle koşar, runtime vptr'ler kurucu-kanıt
+  TOHUMLARIYLA verilir — process ÇALIŞMAZ; çoklu vtable adayında her aday AYRI
+  pass'te koşar, hepsi aynı hedefe giderse KANITLANMIŞ çözüm), **atlas
+  inversiyonu** (metot → sahip vftable'lar: sanal metod gövdesinde this'in
+  dinamik tipi kanıtlanır — CHA), **RTTI-güdümlü fonksiyon keşfi** (vtable
+  slotları: +3033 sanal metod), **Instance() katlaması** (`mov ecx,[ms_singleton];
+  add ecx,4; mov eax,[ecx]...` → `CPythonPlayer::Instance().GetStatus(iType)`
+  — kaynak kodla 1:1) ve **metot sözdizimi** (`v4->GetWeaponType()`).
+  Gerçek binary: **4444/9160** dolaylı çağrı statik çözüldü (tier-3 unicorn:
+  +256), `playerGetStatus` PDB'li VE PDB'siz kaynak kodla 1:1.
+- **v7 DEVRİT-PRO + x86-32 DECOMPILER (metin2client.exe'de KANITLI):**
+  **MSVC RTTI atlası** (`rtti` — sembolsüz PE32/PE64'te TypeDescriptor/COL/
+  vftable taraması: sınıf evreni + slot tablosu + kalıtım), **DEVRİT-PRO**
+  (`devirt [adres]` — pencere değerlendiricisi [livestep-lite]: `call
+  [edx+0x88]` üslubu dolaylı çağrıları kurucu vtable-kanıtıyla STATİK çözer,
+  IAT importlarını `dll.api` isimlendirir, çok-impl slot dürüstçe aday
+  listesiyle sanal kalır), **x86-32 decompiler** (cdecl/thiscall arg kurtarma,
+  ertelenmiş çağrı malzemeleşmesi — her çağrı TEK sefer basılır, kısa string
+  sabitleri, PDB isim entegrasyonu). Gerçek binary: 892 sınıf, 3842/7420
+  dolaylı çağrı statik çözüldü; `playerGetStatus` kaynak kodla 1:1
 - **v6 ÇIKTI KALİTESİ:** işaretli pretty-print (`0xffffffff` → `-1`),
   **authoritative DWARF struct giydirme** (parametre tipi biliniyorsa sahte
   struct_N/FILE bağını devralır; belirsizse giydirmekten vazgeçer), -O2 ileri
@@ -170,7 +203,11 @@ $ ./build/bin/godtier_tests
 [6] Mapper (forceBase ile reloc testi) + Unicorn emülasyonu (rax=0x3c, loop=55)
 [6b] API shim: MessageBoxA + IsDebuggerPresent + ExitProcess
 [7] PatchBook (undo/redo)   [8] ProcessAccess (/proc)
-== SONUC: 266 PASS, 0 FAIL ==   (161 tanesi decompiler v2..v6 dogrulamasi:
+[25] v7: RTTI atlası + devirt-pro + x86-32 (fixture_devirt.exe)
+[26] v8: tier-3 unicorn + atlas inversiyonu + Instance() katlaması
+     [26b] v8.1: vfN sozlugu + mekanizma kirilimi (tutarlilik: kategori
+           toplamlari = evren; vf4/vf34/vf2 sozluk notlari; devirt stats)
+== SONUC: 319 PASS, 0 FAIL ==   (189 tanesi decompiler v2..v8 dogrulamasi:
                                  DWARF/PDB import, jump table, vtable, switch,
                                  gercek param/uye adlari + derin fonksiyon kesfi,
                                  imza motoru (.gsig) + libc havuzu + lumina,
@@ -178,7 +215,9 @@ $ ./build/bin/godtier_tests
                                  yapilastirma, phi-SSA (dongu-tasiyici + cmov),
                                  SIMD lane skaler geri acma + DWARF struct
                                  giydirme (o->notlar[k]), CHA devirtualizasyon,
-                                 super blok birlestirme, ARM64/ARM32 analiz —
+                                 super blok birlestirme, ARM64/ARM32 analiz,
+                                 tier-3 unicorn pencere emulasyonu (lineer
+                                 degerlendiricinin COZEMEDIGI vaka) —
                                  hepsi GERCEK binary uzerinde)
 ```
 

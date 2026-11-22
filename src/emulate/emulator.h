@@ -44,6 +44,10 @@ struct EmuConfig {
     size_t traceLimit = 100000;
     bool  traceEnabled = true;
     size_t apiCallLimit = 4096;
+    // v8 (devirt tier-3): toplu emülasyon modu — konsol sessiz + sadece
+    // komut sayacı (capstone trace maliyeti yok)
+    bool  quiet = false;
+    bool  insCountOnly = false;
 };
 
 class Emulator {
@@ -79,12 +83,19 @@ public:
     const std::vector<ApiCall>&    ApiCalls() const { return api_.Calls(); }
     const std::vector<MemAccess>&  Faults() const { return faults_; }
     std::string LastError() const { return lastErr_; }
+    // v8 (devirt tier-3): pass'ler arası kirli-takip günlüğünü sıfırla
+    void ClearMemLog() { memLog_.clear(); }
 
     // Bellek (GUI/CLI için)
     bool ReadMem(u64 va, u8* out, size_t n) const;
     bool WriteMem(u64 va, const u8* p, size_t n);
     u64  AllocHeap(size_t size);              // shim'in HeapAlloc'u bunu kullanır
     u64  HeapBase() const { return cfg_.heapBase; }
+    // v8 (devirt tier-3): genel amaçlı bölge map'i (sentetik nesne sayfası gibi)
+    bool MapRegion(u64 base, size_t size);
+    // v8: çalıştırılan komut sayacı (insCountOnly modu)
+    size_t Executed() const { return executed_; }
+    void ResetExecuted() { executed_ = 0; }
 
     // API shim'e erişim (yeni API tanımlamak için)
     ApiShim& Shim() { return api_; }
@@ -111,6 +122,7 @@ private:
     bool running_ = false;
     u64 finishedMagic_ = 0;      // ana akış ret'i buraya düşerse emülasyon bitti
     u64 heapCursor_ = 0;         // bump allocator imleci
+    size_t executed_ = 0;        // v8: komut sayacı (insCountOnly)
     std::string lastErr_;
     std::vector<TraceEntry> trace_;
     std::vector<MemAccess> memLog_;

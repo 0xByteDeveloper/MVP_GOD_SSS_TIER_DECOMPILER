@@ -1,0 +1,10 @@
+# i4M GodTier v8 — METIN2 GERCEK BINARY KANITI (PDB'LI)
+# playerGetStatus: kaynak kodla 1:1 karsilastirma + devirt kanit zincirleri
+load /home/z/my-project/research/metin2/metin2client.exe
+pdb /home/z/my-project/research/metin2/metin2client.pdb
+funcs playerGetStatus
+decomp 0x4EAD70
+devirt 0x4eada9
+devirt 0x4eadbe
+devirt stats
+quit
