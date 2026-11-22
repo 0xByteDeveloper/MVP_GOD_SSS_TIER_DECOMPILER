@@ -94,6 +94,22 @@ Decompiler derin analizi (gerçek kaynak → disassembly → pseudocode zinciri,
 IDA/Ghidra karşılaştırması): `docs/DECOMPILER_GERCEK_ANALIZ.md` —
 yeniden üretme script'i: `scripts/decomp_demo/decomp_demo.gt`
 
+## v9 Planlama Dokümanları (yol haritası + karar + mimari raporu)
+
+- **`docs/DEVRIT_V9_1_YAPAY_YIGIN_VE_KANIT_MIMARISI.md`** — Yapay yığın / kanıt
+  mimarisi soru-cevap turu: playerGetStatus'un %100 STATİK kanıtla çözüldüğünün
+  anatomisi (Tier-3'ün payı yalnız 256/4444 = %5.8), TryCall'ın 10 adımı, gerçek
+  adresli bellek haritası (yığın 1 MB düzeltmesiyle), "gerçek gibi simülasyon"
+  bilançosu (yığın gerçekliği darboğaz DEĞİL; tohum/kapsam/kanıt eksenleri darboğaz)
+  ve yapay yığından daha iyi 8 yöntemin etki/yatırım tablosu.
+- **`docs/DEVRIT_V9_KARAR_PLANI.md`** — 4-AI analizinin sentezi: 12 somut iddianın
+  kaynak kodda tek tek doğrulaması, %100 sözleşmesi (beşli sınıflandırma,
+  UNKNOWN=0/PARTIAL=0 hedefi) ve altı fazlı uygulama planı (Faz 0 soundness →
+  Faz 5 dinamik kanıt).
+- **`docs/DEVRIT_100_YOL_HARITASI.md`** — v8 sonrası eksik analizi: kalan ~4716
+  çağrının 12 kök nedeni, dünya turu (Ghidra/OOAnalyzer/Binary Ninja/Virtuailor/
+  Qiling/devi/akademik SOTA — hiçbiri %100 statik devirt yapmıyor) ve v9→v12 planı.
+
 ## Decompiler v6 (askeri seviye)
 
 Iki fazli global analiz — IDA/Ghidra modeli.
@@ -247,7 +263,9 @@ i4M-GodTier/
 ├── scripts/         godtier_ghidra.py (headless köprü), demo*.gt,
 │                    decomp_demo/ (kurban.cpp + gerçek-çıktı demo script'i)
 ├── tests/           test_main.cpp + fixtures (kaynak + üreticiler)
-├── docs/            MIMARI.md, ORNEK_OTURUM.md, DECOMPILER_GERCEK_ANALIZ.md
+├── docs/            MIMARI.md, ORNEK_OTURUM.md, DECOMPILER_GERCEK_ANALIZ.md,
+│                    DEVRIT_V8_CANLI_KANIT.md, DEVRIT_100_YOL_HARITASI.md,
+│                    DEVRIT_V9_KARAR_PLANI.md, DEVRIT_V9_1_YAPAY_YIGIN_VE_KANIT_MIMARISI.md
 └── third_party/     include/ + lib/ (Linux .so hazır; Windows .lib koyulur)
 ```
 
