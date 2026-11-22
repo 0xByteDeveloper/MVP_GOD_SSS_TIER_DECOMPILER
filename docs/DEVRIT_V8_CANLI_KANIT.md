@@ -10,7 +10,7 @@
 
 ---
 
-## 0. Yönetici Özeti — v8 Ne Getirdi?
+## 0. Yönetici Özeti — v8/v8.1 Ne Getirdi?
 
 | Silah | Açıklama | Ölçüm (gerçek binary) |
 |---|---|---|
@@ -485,7 +485,7 @@ PDB'siz koşuda aynı kırılım: kurucu 164, atlas 236, unicorn 256, IAT 2.298,
 
 Konsolide gerçek durum: **4588 çağrıda kanıt YOK** (4.117+471), **128 çağrıda kanıt VAR ama çoklu aday**. Toplam = 4716.
 
-## 10. Dürüstlük Sınırları — Ne Çözülmez, Neden, ve Geliştirilince Ne KazANIR
+## 10. Dürüstlük Sınırları — Ne Çözülmez, Neden, ve Geliştirilince Ne KAZANIR
 
 ### 10a. Bugünkü sınırlar (kırılımın diliyle)
 
