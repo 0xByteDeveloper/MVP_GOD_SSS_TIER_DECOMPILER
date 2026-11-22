@@ -48,9 +48,17 @@ public:
     struct RichEntry { u16 id, build; u32 count; };
     const std::vector<RichEntry>& RichHeader() const { return rich_; }
 
-    // TLS dizini
+    // TLS dizini (v9.2: WinInit için tam dizin bilgisi)
+    struct TlsDirInfo {
+        bool present = false;
+        u64  indexVa = 0;        // __tls_index'in VA'sı (loader 0 yazar)
+        u64  callbacksVa = 0;    // NULL sonlandırmalı callback dizisi
+        u64  rawStartVa = 0;     // TLS şablon başlangıcı
+        u32  rawSize = 0;        // şablon boyu (end-start)
+    };
     bool HasTLS() const { return hasTls_; }
     u64  TlsCallbacksVa() const { return tlsCallbacksVa_; }
+    const TlsDirInfo& TLS() const { return tls_; }   // v9.2
 
     const std::vector<std::string>& DelayDlls() const { return delayDlls_; }
 
@@ -87,6 +95,7 @@ private:
     u32  delayDirRva_ = 0, delayDirSize_ = 0;
     bool is64_ = false, hasTls_ = false;
     u64  tlsCallbacksVa_ = 0;
+    TlsDirInfo tls_;                      // v9.2
     u64  coffSymPtr_ = 0; u32 coffSymCount_ = 0, coffStrPtr_ = 0;
 
     std::vector<SectionInfo> sections_;

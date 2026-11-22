@@ -76,6 +76,13 @@ public:
     // Build'in çözücüsü: call adresi -> sonuç
     const std::map<u64, Result>& Results() const { return results_; }
 
+    // v9.2 (Tier-5a WinInit): init-anlık-görüntü kanıtları (VA -> değer).
+    // SADECE statik kanıt (IAT > yazıcı > imaj) susuz kaldığında danışılır —
+    // hiç verilmediyse/kaldırıldıysa davranış bit-bitiye v8.1 ile aynıdır.
+    void SetInitOverlay(const std::map<u64, u64>* ov);
+    bool HasInitOverlay() const { return initOverlay_ != nullptr; }
+    bool UsedInitFact() const { return usedInitFact_; }   // son Resolve/init Build kullandı mı
+
     // v8: tier-3 (Unicorn) + render erişimi — statik-kanıt görünümleri
     struct StaticFactsView {
         bool proven = false;
@@ -104,6 +111,7 @@ public:
         size_t byAtlas = 0;          // atlas inversiyonu (CHA)
         size_t byTier3 = 0;          // Unicorn tohumlu pencere emülasyonu
         size_t byConc = 0;           // vtable'sız somut zincir (imaj verisi)
+        size_t byInit = 0;           // v9.2: WinInit init-anlık-görüntü kanıtı
         // --- çözülemeyen kırılımı (dürüst neden etiketleri) ---
         size_t unMultiCand = 0;      // çoklu aday — tekil tahmin YASAK
         size_t unNoProof = 0;        // kanıt yok: alıcı heap/parametre nesnesi
@@ -167,6 +175,9 @@ private:
 
     std::map<u64, Result> results_;
     Stats stats_;                       // v8.1: Build doldurur
+    // v9.2: WinInit overlay (dışarıdan ödünç — Shell/Pseudocoder sahiplenir)
+    const std::map<u64, u64>* initOverlay_ = nullptr;
+    mutable bool usedInitFact_ = false;  // ReadMemory overlay'e mi baktı
     mutable std::map<u64, std::string> importByIat_;   // IAT VA -> dll.api
     u64 lastIatSlot_ = 0;    // son okunan IAT yuvası (mov reg,[IAT]; call reg)
 

@@ -1,0 +1,11 @@
+# i4M GodTier v9.2 — METIN2 WININIT (Tier-5a) GERCEK BINARY DOGRULAMASI
+# Windows process-init benzetimi: TLS -> CRT-init (statik bagli) -> duvar
+# Sonuc: init-anlik-goruntusu overlay'i + devirt kirilimunda init cozumleri
+load /home/z/my-project/research/metin2/metin2client.exe
+pdb /home/z/my-project/research/metin2/metin2client.pdb
+wininit 30000000
+decomp 0x4EAD70
+devirt 0x4eada9
+devirt 0x4eadbe
+devirt stats
+quit

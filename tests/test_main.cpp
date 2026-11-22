@@ -15,6 +15,7 @@
 #include "asm/assembler.h"
 #include "mapper/mapper.h"
 #include "emulate/emulator.h"
+#include "emulate/wininit.h"
 #include "decomp/cfg.h"
 #include "decomp/pseudocode.h"
 #include "analysis/features.h"
@@ -1597,6 +1598,147 @@ int main() {
             }
         } else {
             std::printf("     (fixture_devirt.exe yok — v8 testleri atlandi)\n");
+        }
+    }
+
+    // ==================================================================
+    // [27] v9.2: WİNİTİT (Tier-5a) — Windows process-init benzetimi
+    //      (fixture_wininit.exe — TLS-callback'li + heap-kuruculu + duvar-API'li
+    //       minyatür Windows süreç başlangıcı; statik analiz YALNIZ WinInit'in
+    //       görebildiği kanıt zincirleri içerir)
+    // ==================================================================
+    {
+        std::printf("[27] v9.2: WinInit Tier-5a — process-init benzetimi (fixture_wininit.exe)\n");
+        if (FileHas("fixture_wininit.exe")) {
+            auto* pe = dynamic_cast<PE*>(Binary::Open(PathOf("fixture_wininit.exe")));
+            CHECK(pe != nullptr, "fixture_wininit.exe acildi (PE32)");
+            if (pe) {
+                MappedImage img;
+                img.LoadFromBinary(*pe);
+                DisasmEngine de;
+                de.Init(pe->GetArch());
+                de.SetMemoryReader([&](u64 va, u8* o, size_t n) { return img.ReadBytes(va, o, n); });
+                Analyzer az(de, *pe, img);
+                az.RunFull(false);
+                Pseudocoder pc(az);
+
+                // ---- WinInit koşusu: TLS fazı → EP → duvar → anlık görüntü ----
+                MsvcRtti& rtti = pc.Rtti();
+                WinInit wi(*pe, &rtti);
+                WinInitConfig cfg;
+                cfg.maxInstructions = 50'000;
+                WinInitReport rep = wi.Run(pe->GetArch(), cfg);
+                CHECK(rep.ok, "wininit kosusu tamamlandi");
+                CHECK(rep.tlsCallbacksTotal == 1 && rep.tlsCallbacksRun == 1,
+                      "TLS callback 1/1 EP oncesi kostu (total=%zu run=%zu)",
+                      rep.tlsCallbacksTotal, rep.tlsCallbacksRun);
+                CHECK(rep.stop == WinInitReport::Stop::Wall,
+                      "duvar API'sinde duruldu (got %s)", rep.StopName());
+                CHECK(rep.stopDetail.find("GetMessageA") != std::string::npos,
+                      "duvar = USER32.GetMessageA (got %s)", rep.stopDetail.c_str());
+                CHECK(rep.staticSlotsChanged == 2,
+                      "2 statik slot degisti: g_vptr_slot(TLS) + g_heapobj(ctor) (got %zu)",
+                      rep.staticSlotsChanged);
+                CHECK(rep.heapVptrSlots == 1, "heap'te 1 vptr kuruldu (got %zu)",
+                      rep.heapVptrSlots);
+                CHECK(rep.overlay.size() == 3,
+                      "overlay 3 giris: statikler + heap vptr (got %zu)",
+                      rep.overlay.size());
+                if (rep.overlay.size() == 3) {
+                    auto it = rep.overlay.find(0x403004);
+                    CHECK(it != rep.overlay.end() && it->second == 0x402000,
+                          "overlay[g_vptr_slot] = fake_vft1 0x402000 (TLS kaniti)");
+                    it = rep.overlay.find(0x403008);
+                    CHECK(it != rep.overlay.end() && it->second >= 0x52000000 &&
+                          it->second < 0x53000000,
+                          "overlay[g_heapobj] = heap adresi (0x%llx)",
+                          it != rep.overlay.end() ? (unsigned long long)it->second : 0ull);
+                    if (it != rep.overlay.end()) {
+                        auto it2 = rep.overlay.find(it->second);
+                        CHECK(it2 != rep.overlay.end() && it2->second == 0x40200C,
+                              "overlay[heap] = fake_vft2 0x40200C (heap vptr kaniti)");
+                    }
+                }
+
+                // ---- devirt + WinInit: yalnız-init-kanıtlı zincirler çözülür ----
+                pc.SetInitOverlay(&rep.overlay);
+                DevirtPro& dp = pc.Devirt();
+                DevirtPro::Result r1 = dp.Resolve(0x401028);
+                CHECK(r1.resolved && r1.target == 0x401040,
+                      "victim1 (TLS-only zincir) func_target1 cozuldu (target=0x%llx)",
+                      (unsigned long long)r1.target);
+                CHECK(r1.proofKind == "init",
+                      "victim1 kanit etiketi = init (got %s)", r1.proofKind.c_str());
+                DevirtPro::Result r2 = dp.Resolve(0x401037);
+                CHECK(r2.resolved && r2.target == 0x401050,
+                      "victim2 (heap-only zincir) func_target2 cozuldu (target=0x%llx)",
+                      (unsigned long long)r2.target);
+                CHECK(r2.proofKind == "init",
+                      "victim2 kanit etiketi = init (got %s)", r2.proofKind.c_str());
+                const DevirtPro::Stats& st = dp.GetStats();
+                CHECK(st.byInit == 2, "kirilim: 2 cozum WinInit init-kanitli (got %zu)",
+                      st.byInit);
+                CHECK(st.universe == 4 && st.resolved == 4,
+                      "evren 4 / cozulen 4 (init 2 + IAT 2) (got %zu/%zu)",
+                      st.universe, st.resolved);
+                delete pe;
+            }
+        } else {
+            std::printf("     (fixture_wininit.exe yok — v9.2 WinInit testleri atlandi)\n");
+        }
+    }
+
+    // ==================================================================
+    // [28] v9.2: WinInit OLMADAN aynı fixture — v8.1 saf statik davranış
+    //      (kontrollülük kanıtı: overlay verilmedikçe TEK SONUÇ değişmez)
+    // ==================================================================
+    {
+        std::printf("[28] v9.2: WinInit'siz kontrol — v8.1 davranisi korunuyor\n");
+        if (FileHas("fixture_wininit.exe")) {
+            auto* pe = dynamic_cast<PE*>(Binary::Open(PathOf("fixture_wininit.exe")));
+            if (pe) {
+                MappedImage img;
+                img.LoadFromBinary(*pe);
+                DisasmEngine de;
+                de.Init(pe->GetArch());
+                de.SetMemoryReader([&](u64 va, u8* o, size_t n) { return img.ReadBytes(va, o, n); });
+                Analyzer az(de, *pe, img);
+                az.RunFull(false);
+                Pseudocoder pc(az);
+                DevirtPro& dp = pc.Devirt();     // overlay YOK
+                DevirtPro::Result r1 = dp.Resolve(0x401028);
+                CHECK(!r1.resolved, "victim1 WinInit'siz COZULMEDI (v8.1 davranisi)");
+                DevirtPro::Result r2 = dp.Resolve(0x401037);
+                CHECK(!r2.resolved, "victim2 WinInit'siz COZULMEDI (v8.1 davranisi)");
+                CHECK(dp.GetStats().byInit == 0, "kirilimda init cozumu 0 (durust)");
+                delete pe;
+            }
+        } else {
+            std::printf("     (fixture_wininit.exe yok — kontrol testi atlandi)\n");
+        }
+    }
+
+    // ==================================================================
+    // [29] v9.2: WinInit x64 yol dumanı (fixture.exe — PE32+, TLS yok,
+    //      EP matematik yapıp döner → EP-DÖNDÜ duruşu beklenir)
+    // ==================================================================
+    {
+        std::printf("[29] v9.2: WinInit x64 yol duman testi (fixture.exe)\n");
+        if (FileHas("fixture.exe")) {
+            auto* pe = dynamic_cast<PE*>(Binary::Open(PathOf("fixture.exe")));
+            CHECK(pe != nullptr, "fixture.exe acildi");
+            if (pe) {
+                WinInit wi(*pe, nullptr);
+                WinInitConfig cfg;
+                cfg.maxInstructions = 100'000;
+                WinInitReport rep = wi.Run(pe->GetArch(), cfg);
+                CHECK(rep.ok, "x64 wininit kosusu tamamlandi");
+                CHECK(rep.stop == WinInitReport::Stop::Ret,
+                      "EP kendi ret'iyle bitti (got %s)", rep.StopName());
+                delete pe;
+            }
+        } else {
+            std::printf("     (fixture.exe yok — x64 duman testi atlandi)\n");
         }
     }
 

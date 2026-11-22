@@ -122,7 +122,8 @@ bool DevirtEmu::EnsureSetup() {
         // x86-32: 4GB altı klasik adresler (ESP 0x7FF000000000'u tutamaz!)
         cfg.stackTop = 0x7FF00000ull;
         cfg.heapBase = 0x52000000ull;
-        cfg.heapSize = 0x00400000ull;
+        cfg.heapSize = 0x01000000ull;   // v9.2: 4→16 MB (WinInit ile aynı;
+                                        //     yalnız kapasite — davranış aynı)
     }
     emu_ = std::make_unique<Emulator>();
     if (!emu_->Setup(az_.Bin(), az_.Image(), mapRep_, arch, cfg)) {
@@ -180,6 +181,20 @@ void DevirtEmu::ApplySeeds(const SeedChoice& sc) {
     if (sc.useThis) {
         u64 tv = sc.thisVft;
         emu_->WriteMem(thisSynth_ + (u64)sc.thisOff, (u8*)&tv, ps);
+    }
+}
+
+// ----------------------------------------------------------------------------
+// v9.2 (Tier-5a): WinInit init-anlık görüntüsünü emülatör belleğine yaz.
+// Not: WinInit'in heap düzeni bu emülatörle aynı tabanı kullanır (x86-32:
+// 0x52000000) — overlay'deki heap adresleri burada da geçerlidir.
+// ----------------------------------------------------------------------------
+void DevirtEmu::ApplyInitOverlay() {
+    if (!emu_ || !initOverlay_ || initOverlay_->empty()) return;
+    const u64 ps = is64_ ? 8 : 4;
+    for (auto& [va, val] : *initOverlay_) {
+        u64 v = val;
+        emu_->WriteMem(va, (u8*)&v, ps);   // eşlenmemişse sessiz atlanır
     }
 }
 
@@ -272,8 +287,9 @@ DevirtEmu::Attempt DevirtEmu::TryCall(u64 callAddr, const SeedChoice& sc,
 
     // 1) pencere
     u64 winStart = WindowStart(*ins, ci);
-    // 2-3) temizlik + tohumlar
+    // 2-3) temizlik + tohumlar (+ v9.2 init-anlık görüntüsü)
     RestoreDirty();
+    ApplyInitOverlay();
     ApplySeeds(sc);
     // 4) yazmaçlar
     ZeroRegs();

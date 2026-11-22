@@ -1,0 +1,35 @@
+{
+ "program": "fixture_wininit.exe",
+ "language": "x86:LE:32:default",
+ "function_count": 5,
+ "indirect_call_universe": 4,
+ "indirect_call_linked_concrete": 2,
+ "watch_calls": [
+  {
+   "addr": "0x401028",
+   "found": true,
+   "resolved": false,
+   "target": null,
+   "mnemonic": "CALL"
+  },
+  {
+   "addr": "0x401037",
+   "found": true,
+   "resolved": false,
+   "target": null,
+   "mnemonic": "CALL"
+  }
+ ],
+ "probe_funcs": [
+  {
+   "addr": "0x401080",
+   "discovered": true,
+   "at_start": true
+  },
+  {
+   "addr": "0x401040",
+   "discovered": false,
+   "at_start": false
+  }
+ ]
+}

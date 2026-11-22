@@ -16,6 +16,7 @@
 #include "decomp/types.h"
 #include "format/pdb.h"
 #include "disasm/analyzer.h"
+#include <map>
 #include <memory>
 #include <string>
 
@@ -53,6 +54,13 @@ public:
     // v7: DEVRİT-PRO motoru (lazy — Rtti + TI hazır olduktan sonra Build)
     DevirtPro& Devirt();
 
+    // v9.2 (Tier-5a WinInit): init-anlık-görüntü kanıtları (dışarıdan ödünç;
+    // Shell sahiplenir). Devirt() kurulmadan ÖNCE verilirse Build sırasında
+    // etkili olur; kurulduysa tekil Resolve() çağrılarında etkili olur
+    // (cached Build sonuçları yenilenmez — dürüst uyarı Shell tarafında).
+    void SetInitOverlay(const std::map<u64, u64>* ov);
+    bool DevirtBuilt() const { return devirtPro_ != nullptr; }
+
     // Harici decompiler köprüleri
     static std::string BridgeRetDec(const std::string& pePath, const std::string& outPath);
     static std::string BridgeGhidra(const std::string& filePath, const std::string& outPath);
@@ -64,6 +72,7 @@ private:
     std::unique_ptr<PdbInfo> pendingPdb_;   // TI kurulana dek bekleyen PDB
     std::unique_ptr<MsvcRtti> rtti_;
     std::unique_ptr<DevirtPro> devirtPro_;
+    const std::map<u64, u64>* pendingOverlay_ = nullptr;   // v9.2: WinInit
     std::string Decompile32(u64 start);     // v7: PE32 (x86) pseudocode yolu
 };
 

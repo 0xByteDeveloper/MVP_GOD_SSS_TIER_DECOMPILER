@@ -31,7 +31,14 @@ bool Emulator::Setup(const Binary& bin, const MappedImage& img, const MapReport&
     api_ = ApiShim{};
     api_.allocHeap = [this](size_t n) { return AllocHeap(n); };
     api_.readMem = [this](u64 va, u8* o, size_t n) { return ReadMem(va, o, n); };
+    api_.writeMem = [this](u64 va, const u8* p, size_t n) { return WriteMem(va, p, n); };
     api_.out = [](const std::string& s) { LogLine(LogColor::Yellow, "    %s", s.c_str()); };
+    api_.SetLogLimit(cfg.apiCallLimit);   // v9.2: yapılandırma artık gerçekten bağlandı
+    api_.makeDynStub = [this](const std::string& d, const std::string& f) {
+        return MakeDynApiStub(d, f);
+    };
+    dynStubCursor_ = DYN_STUB_BASE;
+    dynStubs_.clear();
 
     uc_mode mode = (arch == Arch::X86_64) ? UC_MODE_64 : UC_MODE_32;
     if (uc_open(UC_ARCH_X86, mode, &uc_) != UC_ERR_OK) {
@@ -66,6 +73,12 @@ bool Emulator::Setup(const Binary& bin, const MappedImage& img, const MapReport&
         return false;
     }
     heapCursor_ = cfg_.heapBase;
+
+    // 4b) v9.2: dinamik API stub bölgesi (GetProcAddress yoluyla — WinInit)
+    if (uc_mem_map(uc_, DYN_STUB_BASE, DYN_STUB_SIZE, UC_PROT_ALL) != UC_ERR_OK) {
+        lastErr_ = "dinamik stub bolgesi map edilemedi";
+        return false;
+    }
 
     // 5) hook'lar
     uc_hook h1, h2, h3;
@@ -134,6 +147,8 @@ bool Emulator::SetupStackAndPeb() {
     uc_mem_write(uc_, peb, pebBuf, sizeof(pebBuf));
 
     // GS base = TEB (x64). FS base = TEB (x86) — Unicorn'da MSR yazımı
+    tebVa_ = teb;
+    pebVa_ = peb;
     if (arch_ == Arch::X86_64) {
         uc_x86_msr msr;
         msr.rid = 0xC0000101; // MSR_GS_BASE
@@ -154,6 +169,64 @@ bool Emulator::SetupStackAndPeb() {
 void Emulator::HookCode(uc_engine* uc, uint64_t address, uint32_t size, void* ud) {
     Emulator* self = (Emulator*)ud;
 
+    // 0) v9.2: DINAMİK stub (GetProcAddress yoluyla) — shadow IAT ile aynı
+    // mekanizma: args oku → shim → dönüş + stdcall temizliği
+    if (!self->dynStubs_.empty() &&
+        address >= Emulator::DYN_STUB_BASE && address < Emulator::DYN_STUB_BASE + Emulator::DYN_STUB_SIZE) {
+        auto dit = self->dynStubs_.find(address);
+        if (dit != self->dynStubs_.end()) {
+            u64 args[4] = {};
+            if (self->arch_ == Arch::X86_64) {
+                int regs[4] = {UC_X86_REG_RCX, UC_X86_REG_RDX, UC_X86_REG_R8, UC_X86_REG_R9};
+                for (int i = 0; i < 4; i++) uc_reg_read(uc, regs[i], &args[i]);
+            } else {
+                for (int i = 0; i < 4; i++) {
+                    u32 v = 0; u64 esp = 0;
+                    uc_reg_read(uc, UC_X86_REG_ESP, &esp);
+                    uc_mem_read(uc, esp + 4 + i * 4, (u8*)&v, 4);
+                    args[i] = v;
+                }
+            }
+            u64 rsp = 0, rax = 0;
+            uc_reg_read(uc, self->arch_ == Arch::X86_64 ? UC_X86_REG_RSP : UC_X86_REG_ESP, &rsp);
+            bool stop = false;
+            u64 retAddr = 0;
+            rax = self->api_.Handle(*self, dit->second.first, dit->second.second,
+                                    args, rsp, retAddr, stop);
+            if (self->arch_ == Arch::X86_64)
+                uc_reg_write(uc, UC_X86_REG_RAX, &rax);
+            else {
+                u32 eax32 = (u32)rax;
+                uc_reg_write(uc, UC_X86_REG_EAX, &eax32);
+            }
+            u32 cleanup = 0;
+            if (self->arch_ != Arch::X86_64 && self->cfg_.strictStdcall) {
+                std::string lf = ToLower(dit->second.second);
+                u32 tbl = ApiShim::Win32StdcallBytes(lf);
+                if (tbl != 0xFFFFFFFFu) cleanup = tbl;
+                else self->api_.NoteStackCleanupUnknown();
+            }
+            if (retAddr) {
+                if (self->arch_ == Arch::X86_64) {
+                    u64 newRsp = rsp + 8;
+                    uc_reg_write(uc, UC_X86_REG_RSP, &newRsp);
+                    uc_reg_write(uc, UC_X86_REG_RIP, &retAddr);
+                } else {
+                    u32 ret32 = (u32)retAddr, esp32;
+                    uc_reg_read(uc, UC_X86_REG_ESP, &esp32);
+                    esp32 += 4 + cleanup;
+                    uc_reg_write(uc, UC_X86_REG_ESP, &esp32);
+                    uc_reg_write(uc, UC_X86_REG_EIP, &ret32);
+                }
+            }
+            if (stop) {
+                self->finished_ = true;
+                uc_emu_stop(uc);
+            }
+            return;
+        }
+    }
+
     // 1) shadow API stub'ına mı düştük?
     if (address >= SHADOW_IAT_BASE && address < SHADOW_IAT_BASE + SHADOW_IAT_SIZE) {
         for (auto& s : self->mapRep_->shadowApis) {
@@ -166,7 +239,10 @@ void Emulator::HookCode(uc_engine* uc, uint64_t address, uint32_t size, void* ud
                 } else {
                     // x86 stdcall: [esp+4], [esp+8]...
                     for (int i = 0; i < 4; i++) {
-                        u32 v = 0; u64 esp;
+                        // v9.2 DÜZELTME: esp SIFIRDAN başlatılmalı — unicorn ESP'nin
+                        // yalnız 4 baytını yazar, üst 4 bayt çöp kalıyordu (v8 hatası:
+                        // x86-32 IAT shim argümanları hep 0 okunuyordu)
+                        u32 v = 0; u64 esp = 0;
                         uc_reg_read(uc, UC_X86_REG_ESP, &esp);
                         uc_mem_read(uc, esp + 4 + i * 4, (u8*)&v, 4);
                         args[i] = v;
@@ -177,10 +253,39 @@ void Emulator::HookCode(uc_engine* uc, uint64_t address, uint32_t size, void* ud
                 bool stop = false;
                 u64 retAddr = 0;
                 rax = self->api_.Handle(*self, s.dllName, s.funcName, args, rsp, retAddr, stop);
-                uc_reg_write(uc, UC_X86_REG_RAX, &rax);
+                // v9.2 DÜZELTME: x86-32 modunda UC_X86_REG_RAX yazımı SESSİZCE
+                // işe yaramıyor (unicorn 32-bit yalnız 32-bit reg kimliklerini
+                // kabul eder) — API dönüş değeri v8'den beri x86-32'de hiç
+                // yayılmıyordu. EAX'e yaz.
+                if (self->arch_ == Arch::X86_64)
+                    uc_reg_write(uc, UC_X86_REG_RAX, &rax);
+                else {
+                    u32 eax32 = (u32)rax;
+                    uc_reg_write(uc, UC_X86_REG_EAX, &eax32);
+                }
                 // stdcall'da çağrılan fonksiyon argümanları yığından çeker;
                 // emülasyonda bunu bilmediğimiz için dönüşü normal ret ile yapıyoruz
                 // (argüman temizlemesi: kaç bayt sökeceğimizi bilmiyoruz -> cdecl varsay)
+                //
+                // v9.2 (WinInit strictStdcall): x86-32'de Win32 API'leri stdcall'dır
+                // — çağrılan argümanları kendisi söker. Temizlik baytı: (1) Win32
+                // tablo, (2) dönüş adresinde "add esp,N" varsa cdecl=0, (3) bilinmiyor
+                // → 0 + sayaç (WinInit raporunda görünür — sessiz yanlış YOK).
+                u32 cleanup = 0;
+                if (self->arch_ != Arch::X86_64 && self->cfg_.strictStdcall) {
+                    std::string lf = ToLower(s.funcName);
+                    u32 tbl = ApiShim::Win32StdcallBytes(lf);
+                    if (tbl != 0xFFFFFFFFu) {
+                        cleanup = tbl;
+                    } else {
+                        u8 pb[3] = {};
+                        bool probe = retAddr && uc_mem_read(uc, retAddr, pb, 3) == UC_ERR_OK;
+                        bool addEsp = probe && ((pb[0] == 0x83 && pb[1] == 0xC4) ||
+                                                (pb[0] == 0x81 && pb[1] == 0xC4));
+                        if (!addEsp)
+                            self->api_.NoteStackCleanupUnknown();
+                    }
+                }
                 if (retAddr) {
                     if (self->arch_ == Arch::X86_64) {
                         u64 newRsp = rsp + 8;
@@ -189,7 +294,7 @@ void Emulator::HookCode(uc_engine* uc, uint64_t address, uint32_t size, void* ud
                     } else {
                         u32 ret32 = (u32)retAddr, esp32;
                         uc_reg_read(uc, UC_X86_REG_ESP, &esp32);
-                        esp32 += 4;
+                        esp32 += 4 + cleanup;
                         uc_reg_write(uc, UC_X86_REG_ESP, &esp32);
                         uc_reg_write(uc, UC_X86_REG_EIP, &ret32);
                     }
@@ -264,12 +369,15 @@ void Emulator::HookMemInvalid(uc_engine* uc, uc_mem_type type, uint64_t address,
     Emulator* self = (Emulator*)ud;
     MemAccess m;
     m.addr = address; m.size = (u64)size; m.value = (u64)value;
-    m.write = (type == UC_MEM_WRITE);
+    // v9.2 DÜZELTME: UNMAPPED varyantları da doğru sınıfla (önceden
+    // UC_MEM_WRITE_UNMAPPED "OKUMA" basıyordu)
+    m.write = (type == UC_MEM_WRITE || type == UC_MEM_WRITE_UNMAPPED);
     m.invalid = true;
     self->faults_.push_back(m);
     if (!self->cfg_.quiet)
         LogErr("ERISIM IHMALI: %s 0x%llx (%d bayt) @ rip=0x%llx",
-               type == UC_MEM_WRITE ? "YAZMA" : type == UC_MEM_READ ? "OKUMA" : "CALISTIRMA",
+               m.write ? "YAZMA" : (type == UC_MEM_READ || type == UC_MEM_READ_UNMAPPED)
+                        ? "OKUMA" : "CALISTIRMA",
                (unsigned long long)address, size, (unsigned long long)self->CurrentPc());
     uc_emu_stop(uc);
     // işlemi durduruldu (uc_emu_stop çağrıldı)
@@ -306,6 +414,50 @@ bool Emulator::Run(u64 startVa, u64 untilVa, u64 timeoutUs, size_t maxIns) {
     }
 
     uc_err err = uc_emu_start(uc_, startVa, untilVa, timeoutUs, maxIns);
+    if (err != UC_ERR_OK && !finished_) {
+        lastErr_ = std::string(uc_strerror(err));
+        if (!cfg_.quiet)
+            LogWarn("Emulasyon durdu: %s (rip=0x%llx)", lastErr_.c_str(),
+                    (unsigned long long)CurrentPc());
+        return false;
+    }
+    return true;
+}
+
+// v9.2 (WinInit): argümanlı giriş — DllMain(hInst,reason,res) / TLS callback
+// (dllHandle,reason,res) düzenleri. x86: [sp]=ret, [sp+4..]=args;
+// x64: ilk 4 arg kayıtlarda, 5.+ [sp+8]..
+bool Emulator::RunWithArgs(u64 startVa, const std::vector<u64>& args,
+                           u64 timeoutUs, size_t maxIns) {
+    if (!uc_) return false;
+    startVa_ = startVa;
+    finished_ = false;
+    const bool is64 = (arch_ == Arch::X86_64);
+    const u64 ps = is64 ? 8 : 4;
+    u64 sp = cfg_.stackTop - 0x100;
+    u64 magicRet = finishedMagic_;
+    uc_mem_write(uc_, sp, (u8*)&magicRet, ps);        // [sp] = sihirli dönüş
+    if (is64) {
+        int regs[4] = {UC_X86_REG_RCX, UC_X86_REG_RDX, UC_X86_REG_R8, UC_X86_REG_R9};
+        for (size_t i = 0; i < args.size() && i < 4; i++) {
+            u64 v = args[i];
+            uc_reg_write(uc_, regs[i], &v);
+        }
+        for (size_t i = 4; i < args.size(); i++) {
+            u64 v = args[i];
+            uc_mem_write(uc_, sp + 8 + (i - 4) * 8, (u8*)&v, 8);
+        }
+        u64 rsp = sp;
+        uc_reg_write(uc_, UC_X86_REG_RSP, &rsp);
+    } else {
+        for (size_t i = 0; i < args.size(); i++) {
+            u32 v = (u32)args[i];
+            uc_mem_write(uc_, sp + 4 + i * 4, (u8*)&v, 4);
+        }
+        u32 sp32 = (u32)sp;
+        uc_reg_write(uc_, UC_X86_REG_ESP, &sp32);
+    }
+    uc_err err = uc_emu_start(uc_, startVa, 0, timeoutUs, maxIns);
     if (err != UC_ERR_OK && !finished_) {
         lastErr_ = std::string(uc_strerror(err));
         if (!cfg_.quiet)
@@ -376,6 +528,24 @@ bool Emulator::ReadMem(u64 va, u8* out, size_t n) const {
 
 bool Emulator::WriteMem(u64 va, const u8* p, size_t n) {
     return uc_ && uc_mem_write(uc_, va, p, n) == UC_ERR_OK;
+}
+
+// v9.2 (WinInit): GetProcAddress için çağrılabilir dinamik stub.
+// Statik UCRT, CRT-init'te API'leri GetProcAddress ile bulup doğrudan
+// ÇAĞIRIR (ör. InitializeCriticalSectionEx) — dönen adres stub bölgesinde
+// olur, HookCode yakalar, shim gerçek davranışı uygular.
+u64 Emulator::MakeDynApiStub(const std::string& dll, const std::string& func) {
+    if (!uc_) return 0;
+    // aynı isim için önceden üretilmiş stub'ı kullan
+    for (auto& [va, name] : dynStubs_)
+        if (name.second == func && name.first == dll) return va;
+    if (dynStubCursor_ + 16 > DYN_STUB_BASE + DYN_STUB_SIZE) return 0;
+    u64 stub = dynStubCursor_;
+    dynStubCursor_ += 16;
+    u8 ret = 0xC3;
+    uc_mem_write(uc_, stub, &ret, 1);
+    dynStubs_[stub] = { dll, func };
+    return stub;
 }
 
 u64 Emulator::AllocHeap(size_t size) {

@@ -434,6 +434,7 @@ bool Shell::ExecuteCommand(const std::string& line) {
     else if (cmd == "pdb") CmdPdb(rest);
     else if (cmd == "rtti") CmdRtti(rest);
     else if (cmd == "devirt") CmdDevirt(rest);
+    else if (cmd == "wininit") CmdWinInit(rest);   // v9.2: Tier-5a
     else if (cmd == "deep") CmdDeep(rest);
     else if (cmd == "sig") CmdSig(rest);
     else if (cmd == "lumina") CmdLumina(rest);

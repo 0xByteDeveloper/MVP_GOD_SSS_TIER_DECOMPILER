@@ -30,6 +30,7 @@ ve **cross-platform** (Windows + Linux) tek bir C++ motorunda birleştirildi.
 | **asm** | **Keystone tabanlı gerçek assembler** — eski el yapımı assembler'ın yerine + round-trip doğrulama + sınırsız undo/redo patch defteri | Keystone, x64dbg |
 | **mapper** | **Cross-platform Windows loader emülasyonu**: 7 adımlı akış, elle reloc (DIR64/HIGHLOW), **shadow IAT** (gerçek LoadLibrary YOK — Linux'ta da çalışır!), TLS raporu | libpeconv, i4M PEManualMapper, Qiling |
 | **emulate** | **Unicorn ile kod gerçekten çalışır**: instruction trace, bellek erişim günlüğü, PEB/TEB-lite, stack/heap, **API shim** (MessageBoxA, ExitProcess, HeapAlloc, IsDebuggerPresent=false, ...) + apitrace | Unicorn, Speakeasy, Qiling |
+| **emulate/wininit** | **v9.2 WİNİTİT (Tier-5a)**: Windows süreç-başlangıcı benzetimi — TLS callback'ler EP'den önce, CRT-init gerçek kod, duvar API'sinde dürüst duruş, deterministik çevre, dinamik API stub'ları, init-anlık-görüntüsü kanıt overlay'i (devirt'e `IAT > kurucu > init > imaj` önceliğiyle) | Qiling OS katmanı, Speakeasy win32 modeli, Windows Internals |
 | **decomp** | CFG kurulumu (basic block + kenarlar), **döngü tespiti** (while), C-benzeri pseudocode üretici (API çağrıları `dll.api(arg...)` olarak), RetDec/Ghidra headless köprüleri | Ghidra decompiler, angr, RetDec, IDA üslubu |
 | **analysis** | **imphash (pefile ile birebir aynı — testle kanıtlı)**, bölüm entropisi, packer sezgileri (DIE tarzı 6 kural), **findcrypt** (AES/RC4/MD5/SHA/CRC32 sabitleri), capa-lite yetenek çıkarımı | Mandiant capa/FLOSS, YARA, PE-bear, findcrypt |
 | **proc** | Process bellek erişimi: **Windows** ReadProcessMemory + **Linux** /proc/pid/mem + modül listesi | x64dbg, pwndbg, i4M InstanceManager |
@@ -96,6 +97,12 @@ yeniden üretme script'i: `scripts/decomp_demo/decomp_demo.gt`
 
 ## v9 Planlama Dokümanları (yol haritası + karar + mimari raporu)
 
+- **`docs/GOD_SSS_TIER_MVP_V9_2_WININIT.md`** — **v9.2 WİNİTİT (Tier-5a)**: Windows
+  süreç-başlangıcı benzetimi (kernel→yığın→import→TLS(EP öncesi)→CRT-init→duvar),
+  kontrollü fixture'ta **4/4 devirt** (Ghidra 12.2 aynı fixture'ta 2/4), WinInit'in
+  avladığı **6 gerçek motor hatası**, sıfır-regresyon kanıtı (metin2 kırılımları
+  bit-bitiye aynı), Ghidra 12.2 taze kıyaslaması ve **yeniden-derlenebilirlik cevabı**
+  (R0→R3 merdiveni + R1 diferansiyel-test sertifikası = %100'ün nesnel ölçüsü).
 - **`docs/DEVRIT_V9_1_YAPAY_YIGIN_VE_KANIT_MIMARISI.md`** — Yapay yığın / kanıt
   mimarisi soru-cevap turu: playerGetStatus'un %100 STATİK kanıtla çözüldüğünün
   anatomisi (Tier-3'ün payı yalnız 256/4444 = %5.8), TryCall'ın 10 adımı, gerçek
@@ -109,6 +116,27 @@ yeniden üretme script'i: `scripts/decomp_demo/decomp_demo.gt`
 - **`docs/DEVRIT_100_YOL_HARITASI.md`** — v8 sonrası eksik analizi: kalan ~4716
   çağrının 12 kök nedeni, dünya turu (Ghidra/OOAnalyzer/Binary Ninja/Virtuailor/
   Qiling/devi/akademik SOTA — hiçbiri %100 statik devirt yapmıyor) ve v9→v12 planı.
+
+## v9.2 WİNİTİT — Windows süreç-başlangıcı benzetimi (Tier-5a)
+
+```bash
+# herhangi bir PE üzerinde (metin2 dahil, tüm dosyalar — jenerik):
+gt> wininit 30000000          # TLS + CRT-init + duvar; kanıtlar devirt'e otomatik bağlanır
+gt> wininit 30000000 verbose  # + son-40 API çağrısı ve son-400 komut teşhisi
+gt> wininit off               # kanıtları kaldır → v8.1 saf statik davranış
+```
+
+- **Sıra Windows'un sırası**: TLS callback'ler EP'den ÖNCE koşar (statik tarayıcılar
+  bunları fonksiyon olarak bile görmez — WinInit koşutur, kanıt üretir), CRT-init
+  gerçek x86 kodu olarak Unicorn'da yürür, oyun mantığına girildiğinde duvar API'sinde
+  dürüstçe durulur (GetMessage*/connect/CreateWindowEx*...).
+- **Kanıt ürünü**: yazılabilir bölümdeki her değişen slot + heap'teki her vptr →
+  init-anlık-görüntüsü overlay'i → devirt'te `IAT > kurucu > init > imaj` önceliğiyle,
+  `WinInit Tier-5a` etiketiyle çözüm.
+- **Determinizm**: tek thread (CreateThread kaydedilir koşmaz), sabit PID/TID/saat/
+  QPC/tick — her koşu aynı sonucu verir (testlerin teminatı).
+- **Kontrollülük**: kendi görüntü kopyasında çalışır; `wininit` çağrılmadan motor
+  davranışı bit-bitiye v8.1 ile aynıdır (metin2 kırılımlarıyla kanıtlı).
 
 ## Decompiler v6 (askeri seviye)
 
@@ -223,7 +251,12 @@ $ ./build/bin/godtier_tests
 [26] v8: tier-3 unicorn + atlas inversiyonu + Instance() katlaması
      [26b] v8.1: vfN sozlugu + mekanizma kirilimi (tutarlilik: kategori
            toplamlari = evren; vf4/vf34/vf2 sozluk notlari; devirt stats)
-== SONUC: 319 PASS, 0 FAIL ==   (189 tanesi decompiler v2..v8 dogrulamasi:
+[27] v9.2: WinInit Tier-5a — TLS 1/1 EP oncesi, duvar durusu, overlay 3 giris,
+     TLS-only + heap-only zincirler init-kanitiyla cozuldu (fixture_wininit.exe)
+[28] v9.2: WinInit'siz negatif kontrol — ayni cagrilar cozulmedi (v8.1 davranisi)
+[29] v9.2: WinInit x64 yol duman testi (fixture.exe, PE32+)
+== SONUC: 342 PASS, 0 FAIL ==   (v9.2: +[27] WinInit kaniti +[28] WinInit'siz
+negatif kontrol +[29] x64 duman; 189 tanesi decompiler v2..v8 dogrulamasi:
                                  DWARF/PDB import, jump table, vtable, switch,
                                  gercek param/uye adlari + derin fonksiyon kesfi,
                                  imza motoru (.gsig) + libc havuzu + lumina,

@@ -16,7 +16,7 @@
 #include "emulate/apishim.h"
 #include <unicorn/unicorn.h>
 #include <capstone/capstone.h>
-#include <functional>
+#include <functional>\n#include <map>
 #include <string>
 #include <vector>
 
@@ -48,6 +48,10 @@ struct EmuConfig {
     // komut sayacı (capstone trace maliyeti yok)
     bool  quiet = false;
     bool  insCountOnly = false;
+    // v9.2 (WinInit Tier-5a): x86-32 stdcall argüman temizliği — Win32
+    // API'leri yığıttan kendi söker; shim tablo+probe ile taklit edilir.
+    // Varsayılan KAPALI (mevcut davranış bit-bitiye korunur); yalnız WinInit açar.
+    bool  strictStdcall = false;
 };
 
 class Emulator {
@@ -64,9 +68,18 @@ public:
 
     // Çalıştırma modları
     bool Run(u64 startVa, u64 untilVa = 0, u64 timeoutUs = 0, size_t maxIns = 0);
+    // v9.2 (WinInit): argümanlı giriş — x86: yığında ([sp]=ret, [sp+4..])
+    // x64: rcx/rdx/r8/r9 + 5. arg yığında. DLL DllMain / TLS callback çağrıları için.
+    bool RunWithArgs(u64 startVa, const std::vector<u64>& args,
+                     u64 timeoutUs = 0, size_t maxIns = 0);
     bool Step(size_t n = 1);                  // son Run start'ından devam
     void Stop();
     u64  CurrentPc() const;
+    Arch GetArch() const { return arch_; }   // v9.2: shim ptr-boyutu için
+
+    // v9.2: TEB/PEB adresleri (WinInit gerçek NT düzenini üstüne yazar)
+    u64  TebVa() const { return tebVa_; }
+    u64  PebVa() const { return pebVa_; }
 
     // Register erişimi
     u64  GetReg(int ucReg) const;
@@ -100,6 +113,10 @@ public:
     // API shim'e erişim (yeni API tanımlamak için)
     ApiShim& Shim() { return api_; }
 
+    // v9.2 (WinInit): GetProcAddress'a ÇAĞRILABİLİR dinamik stub ver
+    // (stub bölgesi 0x76000000; HookCode yakalar → shim işler)
+    u64  MakeDynApiStub(const std::string& dll, const std::string& func);
+
     // Emülasyon bitti mi? (ExitProcess shim'i ya da ret ile ana akış bitti)
     bool Finished() const { return finished_; }
     const EmuConfig& Config() const { return cfg_; }
@@ -121,6 +138,7 @@ private:
     bool finished_ = false;
     bool running_ = false;
     u64 finishedMagic_ = 0;      // ana akış ret'i buraya düşerse emülasyon bitti
+    u64 tebVa_ = 0, pebVa_ = 0;  // v9.2: SetupStackAndPeb doldurur
     u64 heapCursor_ = 0;         // bump allocator imleci
     size_t executed_ = 0;        // v8: komut sayacı (insCountOnly)
     std::string lastErr_;
@@ -128,6 +146,11 @@ private:
     std::vector<MemAccess> memLog_;
     std::vector<MemAccess> faults_;
     ApiShim api_;
+    // v9.2: dinamik API stub'ları (GetProcAddress yoluyla)
+    static const u64 DYN_STUB_BASE = 0x76000000ull;
+    static const u64 DYN_STUB_SIZE = 0x00100000ull;
+    u64 dynStubCursor_ = 0;
+    std::map<u64, std::pair<std::string, std::string>> dynStubs_;
     // komut metni için mini disassembler'a ihtiyaç var; forward decl yerine
     // burada capstone handle'ı ayrıca tutuyoruz
     csh cs_ = 0;

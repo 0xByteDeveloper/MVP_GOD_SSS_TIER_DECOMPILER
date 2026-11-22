@@ -19,6 +19,7 @@
 #include "analysis/sigs.h"
 #include "analysis/obfus.h"
 #include "proc/process.h"
+#include "emulate/wininit.h"                    // v9.2: Tier-5a
 #include <memory>
 #include <string>
 
@@ -49,6 +50,8 @@ private:
     Mapper mapper_;
     std::unique_ptr<Emulator> emu_;
     MapReport mapRep_;
+    std::map<u64, u64> initOverlay_;          // v9.2: WinInit kanıtları
+    bool initOverlayValid_ = false;           // v9.2: wininit koşuldu mu
     PatchBook patches_;
     ProcessAccess proc_;
     std::string loadedPath_;
@@ -85,6 +88,7 @@ private:
     void CmdPdb(const std::vector<std::string>& a);
     void CmdRtti(const std::vector<std::string>& a);      // v7: RTTI atlası
     void CmdDevirt(const std::vector<std::string>& a);    // v7: devirt-pro
+    void CmdWinInit(const std::vector<std::string>& a);   // v9.2: Tier-5a WinInit
     void CmdDeep(const std::vector<std::string>& a);      // v4: derin keşif
     void CmdSig(const std::vector<std::string>& a);       // v4: imza motoru
     void CmdLumina(const std::vector<std::string>& a);    // v6: isim havuzu

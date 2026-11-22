@@ -3771,6 +3771,8 @@ MsvcRtti& Pseudocoder::Rtti() {
 DevirtPro& Pseudocoder::Devirt() {
     if (!devirtPro_) {
         devirtPro_ = std::make_unique<DevirtPro>(az_, TI(), Rtti());
+        if (pendingOverlay_)                       // v9.2: WinInit kanıtları
+            devirtPro_->SetInitOverlay(pendingOverlay_);
         devirtPro_->Build();
         // kanıtları TypeInferer'a taşı: TryDevirtualize strateji-0 olarak
         // servis eder (dolaylı çağrı render'ı otomatik statikleşir)
@@ -3780,6 +3782,17 @@ DevirtPro& Pseudocoder::Devirt() {
                                         r.slot, r.className, r.proofKind);
     }
     return *devirtPro_;
+}
+
+// v9.2 (Tier-5a WinInit): overlay'i DevirtPro'ya bağla. Build'den ÖNCE
+// verilmişse kanıt taraması da kullanır; sonraysa tekil Resolve'lar kullanır.
+void Pseudocoder::SetInitOverlay(const std::map<u64, u64>* ov) {
+    if (devirtPro_)
+        devirtPro_->SetInitOverlay(ov);
+    // Devirt henüz kurulmadıysa: kurulum anında bağlanması için beklet
+    // (DevirtPro kurulurken SetInitOverlay çağrısı Shell'den tekrar gelir;
+    //  basitlik için Shell kurulumdan önce bunu ÇAĞIRMAZ — sıra kullanıcının)
+    pendingOverlay_ = ov;
 }
 
 // ---- x86-32 ifade katlayıcı (PE32 cdecl/thiscall/stdcall) -------------------

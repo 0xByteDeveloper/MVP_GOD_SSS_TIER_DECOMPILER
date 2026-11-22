@@ -283,6 +283,7 @@ void DevirtPro::Build() {
             else if (r.proofKind == "tier-3") stats_.byTier3++;
             else if (r.proofKind == "atlas")  stats_.byAtlas++;
             else if (r.proofKind == "kurucu") stats_.byCtor++;
+            else if (r.proofKind == "init")   stats_.byInit++;
             else                              stats_.byConc++;
         }
         else if (!r.candidates.empty()) {
@@ -307,6 +308,14 @@ void DevirtPro::Build() {
     LogInfo("devirt-pro kalanlar: coklu-aday(durust) %zu, kanit-yok "
             "(heap/param alici) %zu, tier-3-pencere %zu",
             stats_.unMultiCand, stats_.unNoProof, stats_.unTier3Win);
+}
+
+// v9.2 (Tier-5a): WinInit init-anlık-görüntü kanıtları bağlanır.
+// Öncelik sırası DEĞİŞMEZ: IAT > statik yazıcı > overlay > imaj baytı.
+// Overlay yalnız statik kanıtın sussa kaldığı yerde değer verir; verildiği
+// çözümler proofKind="init" ile dürüstçe etiketlenir.
+void DevirtPro::SetInitOverlay(const std::map<u64, u64>* ov) {
+    initOverlay_ = ov;
 }
 
 // v8: statik-kanıt görünümleri (tier-3 + Instance() katlaması için)
@@ -401,10 +410,39 @@ DevirtPro::VVal DevirtPro::ReadMemory(u64 addr, std::vector<std::string>* trace)
     // statik yazıcı kanıtı: [S] = nesne işaretçisi (imajda .bss=0!)
     auto sit = statics_.find(addr);
     if (sit != statics_.end() && !sit->second.writers.empty()) {
-        v.k = VVal::Sym;
-        v.c = addr;          // nesne anahtarı = statik VA
-        v.off = 0;
-        return v;
+        // v9.2: yazıcı var ama HİÇ vtable adayı yoksa (fabrika deseni: this
+        // saklanıyor, kurucu ayrı çağrıda) Sym maskesi çözümsüz Unknown'a
+        // düşerdi — init-anlık görüntüsü varsa o devreye girer. vtable adayı
+        // VARSA statik aday semantiği korunur (overlay karışmaz).
+        bool hasVptr = false;
+        for (auto& [o, c] : sit->second.vptrCand)
+            if (!c.empty()) { hasVptr = true; break; }
+        if (hasVptr || !initOverlay_) {
+            v.k = VVal::Sym;
+            v.c = addr;          // nesne anahtarı = statik VA
+            v.off = 0;
+            return v;
+        }
+        // düş: overlay değerine (varsa) — yoksa eski Unknown sonucu
+    }
+    // v9.2: WinInit init-anlık görüntüsü — runtime init sonrası GERÇEK değer.
+    // (dosyada .bss=0 / bayat .data; init koşunca yazıldı. Tek deterministik
+    //  yürütmenin gözlemi — kanıt etiketi "init" olarak taşınır)
+    if (initOverlay_) {
+        auto oit = initOverlay_->find(addr);
+        if (oit != initOverlay_->end()) {
+            v.k = VVal::Conc;
+            v.c = oit->second;
+            usedInitFact_ = true;
+            if (trace) {
+                char b[112];
+                snprintf(b, sizeof b,
+                         "[0x%llx] init-anlik-goruntu: 0x%llx (WinInit Tier-5a)",
+                         (unsigned long long)addr, (unsigned long long)v.c);
+                trace->push_back(b);
+            }
+            return v;
+        }
     }
     // imaj okuma (vftable slotları, hazır veriler)
     u64 ptrSize = az_.Bin().Is64() ? 8 : 4;
@@ -459,6 +497,7 @@ static DevirtPro::VVal ReadObjMem(const DevirtPro::VVal& addr,
 void DevirtPro::EvalFunction(u64 funcVa, const std::vector<Ins>& ins,
                              WriterScan* out, u64 stopAt, Result* result) {
     regs_.clear();
+    usedInitFact_ = false;          // v9.2: pass başında temiz başla
     memFacts_.clear();
     thisVptr_.clear();
     thisVptrAll_.clear();
@@ -599,6 +638,13 @@ void DevirtPro::EvalFunction(u64 funcVa, const std::vector<Ins>& ins,
         VVal addr = evalMemAddr(m, tr, &obj);
         if (addr.k == VVal::Conc) {
             VVal r = ReadMemory(addr.c, tr);
+            // v9.2: overlay'den GELDiYSE ve değer bir vftable ise kanıt
+            // etiketini "init" olarak taşı (varsayılan davranış DEĞİŞMEZ:
+            // yalnız overlay kullanıldıysa lastVft kurulur)
+            if (usedInitFact_ && r.k == VVal::Conc && IsVftable(r.c)) {
+                lastVft = r.c;
+                lastProof = "init";
+            }
             return r;
         }
         if (addr.k == VVal::Sym) {
@@ -684,7 +730,10 @@ void DevirtPro::EvalFunction(u64 funcVa, const std::vector<Ins>& ins,
                 result->target = target.c;
                 result->name = NameForTarget(target.c);
                 // v8.1: kanıt mekanizması etiketi (kırılım istatistiği)
-                result->proofKind = lastVft ? lastProof : "pencere";
+                // v9.2: kanıt kaynağı etiketi — zincir init-anlık görüntüsü
+                // (WinInit Tier-5a) kullandıysa dürüstçe "init" de
+                result->proofKind = lastVft ? lastProof
+                              : (usedInitFact_ ? "init" : "pencere");
                 if (lastVft && rtti_.ByVftable(lastVft)) {
                     result->vftVa = lastVft;
                     result->slot = (int)(lastVftOff / (i64)ptrSize);
@@ -928,6 +977,7 @@ bool DevirtPro::EmuResolve(u64 callAddr, Result& r) {
     if (!tier3Enabled_) return false;
     if (!emu3_)
         emu3_ = std::make_unique<DevirtEmu>(az_, *this, rtti_);
+        emu3_->SetInitOverlay(initOverlay_);   // v9.2: WinInit kanıtları tier-3'e de iner
     if (!emu3_->Available()) return false;
 
     // 1) varsayılan tohumlar: her statik, her ofset → ilk aday
@@ -1061,6 +1111,8 @@ void DevirtPro::DumpStats(std::string& out) const {
     snprintf(buf, sizeof buf,
              "    tier-3 unicorn pencere emu.  : %zu\n", s.byTier3); out += buf;
     snprintf(buf, sizeof buf,
+             "    WinInit init-anlik-goruntusu : %zu\n", s.byInit); out += buf;
+    snprintf(buf, sizeof buf,
              "    IAT importu (dll.api)        : %zu\n", s.byIat); out += buf;
     snprintf(buf, sizeof buf,
              "    vtable'siz somut zincir      : %zu\n", s.byConc); out += buf;
@@ -1095,9 +1147,12 @@ DevirtPro::Result DevirtPro::Resolve(u64 callAddr) {
         } else if (r.vftVa && !r.className.empty()) {
             const char* kanit =
                 r.proofKind == "atlas" ? "atlas inversiyonu (CHA)"
+                : r.proofKind == "init" ? "WinInit init-anlik-goruntusu (Tier-5a)"
                                        : "kurucu vtable-saklama kaniti";
             r.why = r.className + " vftable[" + std::to_string(r.slot) +
                     "] (" + kanit + ")";
+        } else if (r.proofKind == "init") {
+            r.why = "WinInit init-anlik-goruntusu (Tier-5a) — vtable'siz somut zincir";
         } else {
             r.why = "pencere degerlendiricisi: zincir kapandi (vtable'siz somut)";
         }

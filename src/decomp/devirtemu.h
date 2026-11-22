@@ -77,6 +77,13 @@ public:
 
     u64 StaticSynthAddr(u64 staticVa);
 
+    // v9.2 (Tier-5a WinInit): init-anlık-görüntü değerlerini emülatör
+    // belleğine uygula (statik yuvalar + heap vptr'ler). RestoreDirty'den
+    // SONRA her pass'te yeniden yazılır — tier-3 penceresi artık init'te
+    // kurulmuş GERÇEK değerleri görür.
+    void SetInitOverlay(const std::map<u64, u64>* ov) { initOverlay_ = ov; }
+    void ApplyInitOverlay();
+
 private:
     bool EnsureSetup();
     u64 WindowStart(const std::vector<Ins>& ins, size_t callIdx);
@@ -101,6 +108,7 @@ private:
     std::map<u64, u64> synthOf_;            // statik VA -> sentetik nesne VA
     std::set<u64> staticSlots_;             // hızlı "statik yuvası mı?" sorgusu
     std::map<u64, std::string> importByIat_;
+    const std::map<u64, u64>* initOverlay_ = nullptr;   // v9.2: WinInit
 };
 
 } // namespace gt

@@ -96,6 +96,7 @@ add_library(godtier_core STATIC
     src/mapper/mapper.cpp
     src/emulate/emulator.cpp
     src/emulate/apishim.cpp
+    src/emulate/wininit.cpp
     src/decomp/cfg.cpp
     src/decomp/pseudocode.cpp
     src/decomp/devirtpro.cpp

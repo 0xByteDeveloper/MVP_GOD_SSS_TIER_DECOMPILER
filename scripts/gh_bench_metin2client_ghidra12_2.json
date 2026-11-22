@@ -1,0 +1,30 @@
+{
+ "program": "metin2client.exe",
+ "language": "x86:LE:32:default",
+ "function_count": 36152,
+ "indirect_call_universe": 10826,
+ "indirect_call_linked_concrete": 3828,
+ "watch_calls": [
+  {
+   "addr": "0x4eada9",
+   "found": true,
+   "resolved": false,
+   "target": null,
+   "mnemonic": "CALL"
+  },
+  {
+   "addr": "0x4eadbe",
+   "found": true,
+   "resolved": false,
+   "target": null,
+   "mnemonic": "CALL"
+  }
+ ],
+ "probe_funcs": [
+  {
+   "addr": "0x401080",
+   "discovered": false,
+   "at_start": false
+  }
+ ]
+}

@@ -385,6 +385,62 @@ void Shell::CmdRtti(const std::vector<std::string>& a) {
 }
 
 // ----------------------------------------------------------------------------
+// v9.2: WİNİTİT (Tier-5a) — Windows process-init benzetimi
+//   wininit [komut-bütçesi] [verbose]   koştur + kanıtları devirt'e bağla
+//   wininit off                         kanıtları kaldır (v8.1 davranışı)
+//   wininit info                        mevcut overlay özeti
+// ----------------------------------------------------------------------------
+void Shell::CmdWinInit(const std::vector<std::string>& a) {
+    if (!RequireBinary()) return;
+    if (!a.empty() && a[0] == "info") {
+        if (!initOverlayValid_)
+            LogInfo("wininit: henüz koşulmadı (kanıt yok — v8.1 davranışı aktif)");
+        else
+            LogOk("wininit: %zu init kanıtı bağlı (devirt kuralları: IAT > yazıcı > init > imaj)",
+                  initOverlay_.size());
+        return;
+    }
+    if (!a.empty() && a[0] == "off") {
+        initOverlay_.clear();
+        initOverlayValid_ = false;
+        if (ps_) ps_->SetInitOverlay(nullptr);
+        LogOk("wininit: init kanıtları KALDIRILDI (v8.1 saf statik davranış)");
+        return;
+    }
+    if (!pe_) {
+        LogErr("wininit yalnız PE (Windows) dosyalarında çalışır — ELF loader "
+               "benzetimi yol haritasında (öncelik: PE evreni)");
+        return;
+    }
+    EnsureAnalyzed();
+
+    size_t budget = 2'000'000;
+    if (!a.empty()) budget = (size_t)std::strtoull(a[0].c_str(), nullptr, 0);
+    bool verbose = a.size() > 1 && a[1] == "verbose";
+
+    MsvcRtti& rtti = ps_->Rtti();     // vftable sınıflaması (RTTI yoksa sezgisel)
+    WinInit wi(*pe_, &rtti);
+    WinInitConfig cfg;
+    cfg.maxInstructions = budget;
+    cfg.verbose = verbose;
+    WinInitReport rep = wi.Run(bin_->GetArch(), cfg);
+    Log("%s", rep.Summary().c_str());
+    if (!rep.ok) return;
+
+    initOverlay_ = std::move(rep.overlay);
+    initOverlayValid_ = true;
+    bool devirtWasBuilt = ps_->DevirtBuilt();
+    ps_->SetInitOverlay(&initOverlay_);
+    LogOk("wininit: %zu init kanıtı devirt-pro'ya bağlandı — devirt/decomp "
+          "artık init-anlık-görüntüsüyle de çözüyor (etiket: WinInit Tier-5a)",
+          initOverlay_.size());
+    if (devirtWasBuilt)
+        LogWarn("wininit: devirt-pro zaten Build edilmişti — toplu 'devirt stats' "
+                "eski sonuçları gösterir; yeni kanıtlar tekil 'devirt <adres>' "
+                "çağrılarında etkili. Build'i yenilemek için yeni oturum açın.");
+}
+
+// ----------------------------------------------------------------------------
 // v7: DEVRİT-PRO — dolaylı çağrıların tam statik çözümü
 // ----------------------------------------------------------------------------
 void Shell::CmdDevirt(const std::vector<std::string>& a) {

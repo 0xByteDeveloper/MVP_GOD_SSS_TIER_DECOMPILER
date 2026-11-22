@@ -294,11 +294,31 @@ bool PE::ParseTLS() {
     u64 d = RvaToOffset(tlsDirRva_);
     if (!d || !InRaw(d, is64_ ? 40 : 24)) return true;
     hasTls_ = true;
-    u32 cbRva = R32(d + 12); // AddressOfCallBacks (her iki bit genişliğinde aynı ofset)
-    if (cbRva) {
-        tlsCallbacksVa_ = imageBase_ + cbRva;
-        // callback listesini say (yalnızca rapor; ASLR'li dosyada VA'lar reloc'suz okunur)
+    tls_.present = true;
+    // PE spesifikasyonu: TLS dizini adres alanları (Start/End/Index/Callbacks)
+    // ABSOLUTE VA'dır — RVA DEĞİLDİR. (v9.2 düzeltmesi: eski kod ImageBase
+    // ekleyerek adresleri iki katına çıkarıyordu)
+    if (!is64_) {
+        u32 startVa = R32(d + 0), endVa = R32(d + 4);
+        u32 indexVa = R32(d + 8);
+        u32 cbVa    = R32(d + 12);
+        tls_.rawStartVa = startVa;
+        tls_.rawSize    = (endVa > startVa) ? (endVa - startVa) : 0;
+        tls_.indexVa    = indexVa;
+        if (cbVa) tls_.callbacksVa = cbVa;
+    } else {
+        u64 startVa = R64(d + 0), endVa = R64(d + 8);
+        u64 indexVa = R64(d + 16);
+        u64 cbVa    = R64(d + 24);
+        tls_.rawStartVa = startVa;
+        tls_.rawSize    = (u32)((endVa > startVa) ? (endVa - startVa) : 0);
+        tls_.indexVa    = indexVa;
+        if (cbVa) tls_.callbacksVa = cbVa;
     }
+    // v9.2 DÜZELTME: eski kod callback RVA'sını HER İKİ genişlikte d+12'den
+    // okuyordu — PE32+'ta d+12, EndAddressOfRawData'nın ortasıdır (gerçek
+    // ofset d+24). PE32'de d+12 doğrudur. Artık genişlik-farkında okunuyor.
+    if (tls_.callbacksVa) tlsCallbacksVa_ = tls_.callbacksVa;
     return true;
 }
 
